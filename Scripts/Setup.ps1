@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# Setup2.ps1 - Executed via Azure Custom Script Extension
+# Setup.ps1 - Executed via Azure Custom Script Extension
 # Logs: C:\Windows\Temp\cse-setup.log
 
 param (
