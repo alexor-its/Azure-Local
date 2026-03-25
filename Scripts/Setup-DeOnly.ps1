@@ -59,7 +59,7 @@ try {
         Write-Log "  de-DE language pack already installed, skipping."
     } else {
         Write-Log "  Downloading and installing de-DE from Windows Update..."
-        Install-Language -Language de-DE -CopyCulture -ErrorAction Stop
+        Install-Language -Language de-DE -ErrorAction Stop
         Write-Log "  de-DE language pack installed successfully."
     }
     Write-Log "Step 3: Done."
