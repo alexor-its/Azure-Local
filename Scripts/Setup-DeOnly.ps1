@@ -114,6 +114,21 @@ try {
         Set-ItemProperty -Path $geoPath -Name "Name"    -Value "DE"  -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $geoPath -Name "Nation2" -Value "276" -ErrorAction SilentlyContinue
 
+        # User Profile key - modern language/keyboard store used on first login.
+        # If en-US subkey exists here, Windows re-adds EN keyboard on first logon.
+        $userProfile = "$HiveRoot\Control Panel\International\User Profile"
+        $null = New-Item -Path $userProfile -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $userProfile -Name "Languages" -Value ([string[]]@("de-DE")) -Type MultiString
+
+        # de-DE subkey: keyboard tip 0407:00000407 = de-DE language + DE keyboard
+        $deLangKey = "$userProfile\de-DE"
+        $null = New-Item -Path $deLangKey -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $deLangKey -Name "CachedLanguageName" -Value "@Winlangdb.dll,-1100" -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $deLangKey -Name "0407:00000407" -Value 1 -Type DWord
+
+        # Remove en-US subkey - this is what adds EN keyboard on first login
+        Remove-Item -Path "$userProfile\en-US" -Recurse -Force -ErrorAction SilentlyContinue
+
         # Keyboard: DE only (00000407), remove EN completely.
         # Preload:     which layouts are loaded
         # Substitutes: remapping entries (often 00000409 -> en-US), must be cleared
