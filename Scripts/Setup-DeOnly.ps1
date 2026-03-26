@@ -89,21 +89,21 @@ try {
         # Locale / formats
         $intl = "$HiveRoot\Control Panel\International"
         $null = New-Item -Path $intl -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "Locale"      -Value "00000407"       -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "LocaleName"  -Value "de-DE"          -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sLanguage"   -Value "DEU"            -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sCountry"    -Value "Deutschland"    -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "iCountry"    -Value "49"             -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sCurrency"   -Value "EUR"            -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sThousand"   -Value "."              -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sDecimal"    -Value ","              -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sDate"       -Value "."              -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "iDate"       -Value "1"              -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sShortDate"  -Value "dd.MM.yyyy"     -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "Locale"      -Value "00000407"           -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "LocaleName"  -Value "de-DE"              -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "sLanguage"   -Value "DEU"                -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "sCountry"    -Value "Deutschland"        -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "iCountry"    -Value "49"                 -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "sCurrency"   -Value "EUR"                -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "sThousand"   -Value "."                  -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "sDecimal"    -Value ","                  -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "sDate"       -Value "."                  -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "iDate"       -Value "1"                  -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "sShortDate"  -Value "dd.MM.yyyy"         -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $intl -Name "sLongDate"   -Value "dddd, d. MMMM yyyy" -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sTimeFormat" -Value "HH:mm:ss"       -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "s1159"       -Value ""               -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "s2359"       -Value ""               -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "sTimeFormat" -Value "HH:mm:ss"           -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "s1159"       -Value ""                   -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $intl -Name "s2359"       -Value ""                   -ErrorAction SilentlyContinue
 
         # GeoID - Germany = 94 decimal (0x5E)
         # Must be set in registry directly; Set-WinHomeLocation only affects
@@ -113,21 +113,6 @@ try {
         Set-ItemProperty -Path $geoPath -Name "Nation"  -Value "94"  -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $geoPath -Name "Name"    -Value "DE"  -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $geoPath -Name "Nation2" -Value "276" -ErrorAction SilentlyContinue
-
-        # User Profile key - modern language/keyboard store used on first login.
-        # If en-US subkey exists here, Windows re-adds EN keyboard on first logon.
-        $userProfile = "$HiveRoot\Control Panel\International\User Profile"
-        $null = New-Item -Path $userProfile -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $userProfile -Name "Languages" -Value ([string[]]@("de-DE")) -Type MultiString
-
-        # de-DE subkey: keyboard tip 0407:00000407 = de-DE language + DE keyboard
-        $deLangKey = "$userProfile\de-DE"
-        $null = New-Item -Path $deLangKey -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $deLangKey -Name "CachedLanguageName" -Value "@Winlangdb.dll,-1100" -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $deLangKey -Name "0407:00000407" -Value 1 -Type DWord
-
-        # Remove en-US subkey - this is what adds EN keyboard on first login
-        Remove-Item -Path "$userProfile\en-US" -Recurse -Force -ErrorAction SilentlyContinue
 
         # Keyboard: DE only (00000407), remove EN completely.
         # Preload:     which layouts are loaded
