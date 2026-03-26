@@ -171,7 +171,29 @@ try {
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout\Preload" -Name "1" -Value "00000407"
     Write-Log "  [HKLM] Keyboard Preload = 00000407 (de-DE)"
 
-    # 4b: DefaultUser hive (all future new users)
+    # 4b: SYSTEM profile hive (used by LogonUI.exe to render the lock screen date/time)
+    # This hive has no Control Panel\International by default -> LogonUI falls back to en-US.
+    $systemHive    = "C:\Windows\system32\config\systemprofile\NTUSER.DAT"
+    $systemMountKey = "HKLM\TEMP_SYSTEMPROFILE"
+    if (Test-Path $systemHive) {
+        Write-Log "  Loading SYSTEM profile hive (LogonUI locale)..."
+        $rls = & reg.exe load $systemMountKey $systemHive 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            try {
+                Set-LocaleInHive -HiveRoot "HKLM:\TEMP_SYSTEMPROFILE" -Label "SYSTEM-Profile"
+            } finally {
+                [GC]::Collect()
+                Start-Sleep -Seconds 2
+                $rus = & reg.exe unload $systemMountKey 2>&1
+                if ($LASTEXITCODE -ne 0) { Write-Log "  reg unload SYSTEM profile warning: $rus" "WARN" }
+                else { Write-Log "  SYSTEM profile hive unloaded" }
+            }
+        } else {
+            Write-Log "  Could not load SYSTEM profile hive: $rls" "WARN"
+        }
+    }
+
+    # 4c: DefaultUser hive (all future new users)
     $defaultHive = "C:\Users\Default\NTUSER.DAT"
     $mountKey    = "HKLM\TEMP_DEFAULT"
 
@@ -188,7 +210,7 @@ try {
         else { Write-Log "  DefaultUser hive unloaded" }
     }
 
-    # 4c: Existing user profiles (e.g. local admin)
+    # 4d: Existing user profiles (e.g. local admin)
     $profileList = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" |
         ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
         Where-Object {
@@ -221,7 +243,7 @@ try {
         }
     }
 
-    # 4d: Uninstall en-US language pack
+    # 4e: Uninstall en-US language pack
     try {
         $enPack = Get-InstalledLanguage | Where-Object { $_.LanguageId -eq "en-US" }
         if ($enPack) {
