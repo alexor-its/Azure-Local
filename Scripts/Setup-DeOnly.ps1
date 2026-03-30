@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# Setup2-DeOnly.ps1 - Executed via Azure Custom Script Extension
+# Setup.ps1 - Executed via Azure Custom Script Extension
 # Logs: C:\Windows\Temp\cse-setup.log
 
 param (
@@ -7,6 +7,7 @@ param (
 )
 
 $ErrorActionPreference = "Stop"
+
 $LogFile = "C:\Windows\Temp\cse-setup.log"
 
 function Write-Log {
@@ -17,7 +18,7 @@ function Write-Log {
     Write-Output $line
 }
 
-Write-Log "=== Setup2-DeOnly.ps1 started ==="
+Write-Log "=== Setup.ps1 started ==="
 Write-Log "User     : $($env:USERDOMAIN)\$($env:USERNAME)"
 Write-Log "Computer : $($env:COMPUTERNAME)"
 
@@ -42,13 +43,15 @@ foreach ($d in $rawDisks) {
 }
 Write-Log "Step 2: Done."
 
-# Step 3 - Install de-DE Language Pack
-# Must run BEFORE locale steps. Azure WS2025 images ship en-US only.
+# Step 3 - Install de-DE language pack (MUI)
+# Azure WS2025 base images ship en-US only. The MUI pack must be installed
+# before any locale cmdlets are called, otherwise Set-WinUILanguageOverride
+# has no effect and the GUI stays English after reboot.
 Write-Log "Step 3: Installing de-DE language pack..."
 try {
     $installed = Get-InstalledLanguage | Where-Object { $_.LanguageId -eq "de-DE" }
     if ($installed) {
-        Write-Log "  de-DE already installed, skipping."
+        Write-Log "  de-DE already installed, skipping download."
     } else {
         Write-Log "  Downloading de-DE from Windows Update..."
         Install-Language -Language de-DE -ErrorAction Stop
@@ -60,198 +63,91 @@ try {
     throw
 }
 
-# Step 4 - Locale via Registry (safe for SYSTEM context)
-#
-# Set-WinUILanguageOverride / Set-WinUserLanguageList only write to the
-# calling user hive (SYSTEM here). After reboot the real login user has
-# their own untouched hive -> GUI stays English.
-# Fix: write directly into HKLM (system-wide), DefaultUser hive and all
-# existing profile hives using reg.exe load.
-#
-Write-Log "Step 4: Configuring de-DE locale via registry..."
+# Step 4 - Configure de-DE locale, UI language, keyboard and region
+# intl.cpl with CopySettingsToDefaultUserAcct="true" and CopySettingsToSystemAcct="true"
+# propagates all settings to:
+#   - The Default User profile  (all future logins)
+#   - The SYSTEM account        (LogonUI.exe, lock screen date/time format)
+# This avoids manual registry hive manipulation entirely.
+Write-Log "Step 4: Configuring de-DE locale..."
 try {
-
-    # Helper: write all locale values into a mounted hive
-    function Set-LocaleInHive {
-        param([string]$HiveRoot, [string]$Label)
-
-        # MUI / UI language
-        $desktop = "$HiveRoot\Control Panel\Desktop"
-        $null = New-Item -Path $desktop -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $desktop -Name "PreferredUILanguages"        -Value ([string[]]@("de-DE")) -Type MultiString
-        Set-ItemProperty -Path $desktop -Name "PreferredUILanguagesPending" -Value ([string[]]@("de-DE")) -Type MultiString
-        Set-ItemProperty -Path $desktop -Name "MultiUILanguageId"           -Value "00000407"
-
-        $muiCached = "$HiveRoot\Control Panel\Desktop\MuiCached"
-        $null = New-Item -Path $muiCached -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $muiCached -Name "MachinePreferredUILanguages" -Value ([string[]]@("de-DE")) -Type MultiString
-
-        # Locale / formats
-        $intl = "$HiveRoot\Control Panel\International"
-        $null = New-Item -Path $intl -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "Locale"      -Value "00000407"           -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "LocaleName"  -Value "de-DE"              -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sLanguage"   -Value "DEU"                -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sCountry"    -Value "Deutschland"        -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "iCountry"    -Value "49"                 -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sCurrency"   -Value "EUR"                -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sThousand"   -Value "."                  -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sDecimal"    -Value ","                  -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sDate"       -Value "."                  -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "iDate"       -Value "1"                  -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sShortDate"  -Value "dd.MM.yyyy"         -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sLongDate"   -Value "dddd, d. MMMM yyyy" -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "sTimeFormat" -Value "HH:mm:ss"           -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "s1159"       -Value ""                   -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $intl -Name "s2359"       -Value ""                   -ErrorAction SilentlyContinue
-
-        # GeoID - Germany = 94 decimal (0x5E)
-        # Must be set in registry directly; Set-WinHomeLocation only affects
-        # the current user context and does not work under SYSTEM.
-        $geoPath = "$HiveRoot\Control Panel\International\Geo"
-        $null = New-Item -Path $geoPath -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $geoPath -Name "Nation"  -Value "94"  -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $geoPath -Name "Name"    -Value "DE"  -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $geoPath -Name "Nation2" -Value "276" -ErrorAction SilentlyContinue
-
-        # Keyboard: DE only (00000407), remove EN completely.
-        # Preload:     which layouts are loaded
-        # Substitutes: remapping entries (often 00000409 -> en-US), must be cleared
-        # Toggle:      hotkey to switch layouts, remove since only one layout remains
-        $kbBase = "$HiveRoot\Keyboard Layout"
-        $null = New-Item -Path "$kbBase\Preload"     -Force -ErrorAction SilentlyContinue
-        $null = New-Item -Path "$kbBase\Substitutes" -Force -ErrorAction SilentlyContinue
-
-        # Clear all existing preload entries then set DE only
-        $preloadItem = Get-Item -Path "$kbBase\Preload" -ErrorAction SilentlyContinue
-        if ($preloadItem) {
-            $preloadItem.Property | ForEach-Object {
-                Remove-ItemProperty -Path "$kbBase\Preload" -Name $_ -ErrorAction SilentlyContinue
-            }
-        }
-        Set-ItemProperty -Path "$kbBase\Preload" -Name "1" -Value "00000407"
-
-        # Clear substitutes (removes en-US 00000409 mappings)
-        $subsItem = Get-Item -Path "$kbBase\Substitutes" -ErrorAction SilentlyContinue
-        if ($subsItem) {
-            $subsItem.Property | ForEach-Object {
-                Remove-ItemProperty -Path "$kbBase\Substitutes" -Name $_ -ErrorAction SilentlyContinue
-            }
-        }
-
-        # Remove toggle key config (not needed with single layout)
-        Remove-Item -Path "$kbBase\Toggle" -Recurse -Force -ErrorAction SilentlyContinue
-
-        Write-Log "  [$Label] UI language, locale, GeoID=94 (DE), keyboard=DE only"
-    }
-
-    # 4a: HKLM system-wide (login screen, non-unicode apps)
+    # System locale for non-Unicode apps
     Set-WinSystemLocale -SystemLocale de-DE
-    Write-Log "  [HKLM] SystemLocale = de-DE"
+    Write-Log "  SystemLocale = de-DE"
 
-    $null = New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\MUI\Settings" -Force -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\MUI\Settings" `
-        -Name "PreferredUILanguages" -Value ([string[]]@("de-DE")) -Type MultiString
-    Write-Log "  [HKLM] MUI PreferredUILanguages = de-DE"
+    # UI language - works now because MUI pack is installed (Step 3)
+    Set-WinUILanguageOverride -Language de-DE
+    Write-Log "  UILanguageOverride = de-DE"
 
-    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Language" `
-        -Name "Default"         -Value "0407"
-    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Language" `
-        -Name "InstallLanguage" -Value "0407"
-    Write-Log "  [HKLM] NLS Language = 0407 (de-DE)"
+    # Culture and region
+    Set-Culture -CultureInfo de-DE
+    Set-WinHomeLocation -GeoId 0x5E
+    Write-Log "  Culture = de-DE, GeoId = 0x5E (Germany)"
 
-    # Login screen keyboard: DE only
-    $null = New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout\Preload" -Force -ErrorAction SilentlyContinue
-    $kbHklm = Get-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout\Preload" -ErrorAction SilentlyContinue
-    if ($kbHklm) {
-        $kbHklm.Property | ForEach-Object {
-            Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout\Preload" -Name $_ -ErrorAction SilentlyContinue
-        }
-    }
-    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout\Preload" -Name "1" -Value "00000407"
-    Write-Log "  [HKLM] Keyboard Preload = 00000407 (de-DE)"
+    # Language list: de-DE only, DE keyboard only, no en-US
+    $LangList = New-WinUserLanguageList de-DE
+    $LangList[0].InputMethodTips.Clear()
+    $LangList[0].InputMethodTips.Add("0407:00000407")
+    Set-WinUserLanguageList $LangList -Force
+    Write-Log "  Language list = de-DE only, keyboard = 00000407 (DE)"
 
-    # 4b: SYSTEM account hive (HKU\S-1-5-18) - used by LogonUI.exe for lock screen rendering.
-    # The SYSTEM profile NTUSER.DAT is always loaded by Windows at runtime, so reg.exe load
-    # fails. Instead write directly into HKU\S-1-5-18 which is already mounted.
-    # This fixes the lock screen showing English date format despite German UI.
-    Write-Log "  Writing locale to HKU\S-1-5-18 (SYSTEM account, LogonUI lock screen)..."
-    try {
-        # Load HKU hive if not already accessible
-        $null = New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS -ErrorAction SilentlyContinue
+    # intl.cpl XML applies settings to Default User + SYSTEM account.
+    # - No en-US MUI fallback
+    # - No en-US keyboard
+    # - CopySettingsToSystemAcct fixes the lock screen date/time format
+    # UTF-8 without BOM required (intl.cpl rejects BOM)
+    $intlXml = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<gs:GlobalizationServices xmlns:gs="urn:longhornGlobalizationUnattend">
+  <gs:UserList>
+    <gs:User UserID="Current"
+             CopySettingsToDefaultUserAcct="true"
+             CopySettingsToSystemAcct="true"/>
+  </gs:UserList>
+  <gs:LocationPreferences>
+    <gs:GeoID Value="94"/>
+  </gs:LocationPreferences>
+  <gs:MUILanguagePreferences>
+    <gs:MUILanguage Value="de-DE"/>
+  </gs:MUILanguagePreferences>
+  <gs:SystemLocale Name="de-DE"/>
+  <gs:InputPreferences>
+    <gs:InputLanguageID Action="remove" ID="0409:00000409"/>
+    <gs:InputLanguageID Action="add"    ID="0407:00000407" Default="true"/>
+  </gs:InputPreferences>
+  <gs:UserLocale>
+    <gs:Locale Name="de-DE" SetAsCurrent="true" ResetAllSettings="true"/>
+  </gs:UserLocale>
+</gs:GlobalizationServices>
+"@
+    $xmlPath = "$env:TEMP\de-DE-intl.xml"
+    [System.IO.File]::WriteAllText($xmlPath, $intlXml, [System.Text.UTF8Encoding]::new($false))
 
-        Set-LocaleInHive -HiveRoot "HKU:\S-1-5-18" -Label "SYSTEM(HKU)"
-        Write-Log "  HKU\S-1-5-18 locale written"
-    } catch {
-        Write-Log "  HKU\S-1-5-18 write failed (non-critical): $_" "WARN"
-    }
-
-    # 4c: DefaultUser hive (all future new users)
-    $defaultHive = "C:\Users\Default\NTUSER.DAT"
-    $mountKey    = "HKLM\TEMP_DEFAULT"
-
-    Write-Log "  Loading DefaultUser hive..."
-    $rl = & reg.exe load $mountKey $defaultHive 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "reg load DefaultUser failed: $rl" }
-    try {
-        Set-LocaleInHive -HiveRoot "HKLM:\TEMP_DEFAULT" -Label "DefaultUser"
-    } finally {
-        [GC]::Collect()
-        Start-Sleep -Seconds 2
-        $ru = & reg.exe unload $mountKey 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Log "  reg unload DefaultUser warning: $ru" "WARN" }
-        else { Write-Log "  DefaultUser hive unloaded" }
-    }
-
-    # 4d: Existing user profiles (e.g. local admin)
-    $profileList = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" |
-        ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
-        Where-Object {
-            $_.ProfileImagePath -and
-            (Test-Path "$($_.ProfileImagePath)\NTUSER.DAT") -and
-            $_.ProfileImagePath -notmatch "systemprofile|LocalService|NetworkService"
-        }
-
-    foreach ($prof in $profileList) {
-        $profilePath  = $prof.ProfileImagePath
-        $hivePath     = "$profilePath\NTUSER.DAT"
-        $safeName     = $prof.PSChildName -replace '[^a-zA-Z0-9]', '_'
-        $mountPoint   = "HKLM\TEMP_USER_$safeName"
-        $mountPointPS = "HKLM:\TEMP_USER_$safeName"
-        $label        = Split-Path $profilePath -Leaf
-
-        Write-Log "  Loading profile hive: $label"
-        $rl2 = & reg.exe load $mountPoint $hivePath 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Log "  Cannot load hive for $label (user may be logged in): $rl2" "WARN"
-            continue
-        }
-        try {
-            Set-LocaleInHive -HiveRoot $mountPointPS -Label $label
-        } finally {
-            [GC]::Collect()
-            Start-Sleep -Seconds 2
-            $ru2 = & reg.exe unload $mountPoint 2>&1
-            if ($LASTEXITCODE -ne 0) { Write-Log "  reg unload warning ($label): $ru2" "WARN" }
-        }
+    $proc = Start-Process -FilePath "control.exe" `
+        -ArgumentList "intl.cpl,,/f:`"$xmlPath`"" `
+        -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        Write-Log "  intl.cpl exited with code $($proc.ExitCode)" "WARN"
+    } else {
+        Write-Log "  intl.cpl applied (DefaultUser + SYSTEM account updated)"
     }
 
-    # 4e: Uninstall en-US language pack
+    # Remove en-US language pack to prevent Windows from re-adding EN keyboard on login
     try {
         $enPack = Get-InstalledLanguage | Where-Object { $_.LanguageId -eq "en-US" }
         if ($enPack) {
             Uninstall-Language -Language "en-US" -ErrorAction Stop
-            Write-Log "  Language pack en-US uninstalled"
+            Write-Log "  en-US language pack removed"
         } else {
-            Write-Log "  Language pack en-US not present, skipping"
+            Write-Log "  en-US language pack not present, skipping"
         }
     } catch {
-        Write-Log "  en-US uninstall failed (non-critical, may be base language): $_" "WARN"
+        Write-Log "  en-US removal failed (non-critical): $_" "WARN"
     }
 
     Write-Log "Step 4: Done."
 } catch {
-    Write-Log "Step 4: Failed - $_" "ERROR"
+    Write-Log "Step 4: Failed - $_" "WARN"
 }
 
 # Step 5 - Set timezone
@@ -290,7 +186,7 @@ Write-Log "Step 9: Custom application placeholder - no action."
 # Invoke-WebRequest -Uri "https://example.com/app.msi" -OutFile "$InstallPath\app.msi"
 # Start-Process msiexec.exe -ArgumentList "/i `"$InstallPath\app.msi`" /quiet /norestart" -Wait
 
-Write-Log "=== Setup2-DeOnly.ps1 completed successfully ==="
-Write-Log "Rebooting in 10 seconds to apply locale changes..."
-Start-Sleep -Seconds 10
+Write-Log "=== Setup.ps1 completed successfully ==="
+Write-Log "Rebooting in 20 seconds to apply locale changes..."
+Start-Sleep -Seconds 20
 Restart-Computer -Force
