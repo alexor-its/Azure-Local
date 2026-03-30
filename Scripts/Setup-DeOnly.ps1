@@ -171,26 +171,19 @@ try {
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout\Preload" -Name "1" -Value "00000407"
     Write-Log "  [HKLM] Keyboard Preload = 00000407 (de-DE)"
 
-    # 4b: SYSTEM profile hive (used by LogonUI.exe to render the lock screen date/time)
-    # This hive has no Control Panel\International by default -> LogonUI falls back to en-US.
-    $systemHive    = "C:\Windows\system32\config\systemprofile\NTUSER.DAT"
-    $systemMountKey = "HKLM\TEMP_SYSTEMPROFILE"
-    if (Test-Path $systemHive) {
-        Write-Log "  Loading SYSTEM profile hive (LogonUI locale)..."
-        $rls = & reg.exe load $systemMountKey $systemHive 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            try {
-                Set-LocaleInHive -HiveRoot "HKLM:\TEMP_SYSTEMPROFILE" -Label "SYSTEM-Profile"
-            } finally {
-                [GC]::Collect()
-                Start-Sleep -Seconds 2
-                $rus = & reg.exe unload $systemMountKey 2>&1
-                if ($LASTEXITCODE -ne 0) { Write-Log "  reg unload SYSTEM profile warning: $rus" "WARN" }
-                else { Write-Log "  SYSTEM profile hive unloaded" }
-            }
-        } else {
-            Write-Log "  Could not load SYSTEM profile hive: $rls" "WARN"
-        }
+    # 4b: SYSTEM account hive (HKU\S-1-5-18) - used by LogonUI.exe for lock screen rendering.
+    # The SYSTEM profile NTUSER.DAT is always loaded by Windows at runtime, so reg.exe load
+    # fails. Instead write directly into HKU\S-1-5-18 which is already mounted.
+    # This fixes the lock screen showing English date format despite German UI.
+    Write-Log "  Writing locale to HKU\S-1-5-18 (SYSTEM account, LogonUI lock screen)..."
+    try {
+        # Load HKU hive if not already accessible
+        $null = New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS -ErrorAction SilentlyContinue
+
+        Set-LocaleInHive -HiveRoot "HKU:\S-1-5-18" -Label "SYSTEM(HKU)"
+        Write-Log "  HKU\S-1-5-18 locale written"
+    } catch {
+        Write-Log "  HKU\S-1-5-18 write failed (non-critical): $_" "WARN"
     }
 
     # 4c: DefaultUser hive (all future new users)
