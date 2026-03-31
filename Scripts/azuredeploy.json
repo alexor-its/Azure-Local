@@ -1,0 +1,362 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "vmName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name der VM-Ressource"
+      }
+    },
+    "customLocationName": {
+      "type": "string",
+      "metadata": {
+        "description": "Vollstaendige Resource ID der Custom Location, z. B. /subscriptions/.../providers/Microsoft.ExtendedLocation/customLocations/<name>"
+      }
+    },
+    "hciLogicalNetworkName": {
+      "type": "string",
+      "metadata": {
+        "description": "Vollstaendige Resource ID des HCI Logical Networks, z. B. /subscriptions/.../providers/Microsoft.AzureStackHCI/logicalNetworks/<name>"
+      }
+    },
+    "hciImageName": {
+      "type": "string",
+      "metadata": {
+        "description": "Vollstaendige Resource ID des HCI Gallery Images, z. B. /subscriptions/.../providers/Microsoft.AzureStackHCI/galleryImages/<name>"
+      }
+    },
+    "adminUsername": {
+      "type": "string",
+      "metadata": {
+        "description": "Lokaler Admin-Benutzername der VM"
+      }
+    },
+    "adminPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Lokales Admin-Passwort der VM"
+      }
+    },
+    "vCPUCount": {
+      "type": "int",
+      "defaultValue": 2,
+      "metadata": {
+        "description": "Anzahl der vCPUs"
+      }
+    },
+    "memoryMB": {
+      "type": "int",
+      "defaultValue": 8192,
+      "metadata": {
+        "description": "Arbeitsspeicher in MB"
+      }
+    },
+    "dataDisksParams": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Array von Data-Disk-Konfigurationen. Jeder Eintrag: { name, diskSizeGB, dynamic }"
+      }
+    },
+    "enableDomainJoin": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Active Directory Domain Join aktivieren"
+      }
+    },
+    "domainFqdn": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "FQDN der AD-Domäne (z. B. contoso.local)"
+      }
+    },
+    "domainOuPath": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "OU-Pfad für das Computerobjekt (leer = Standard)"
+      }
+    },
+    "domainJoinUsername": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "UPN eines Domain-Accounts mit Join-Berechtigung"
+      }
+    },
+    "domainJoinPassword": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Passwort des Domain-Join-Accounts"
+      }
+    },
+    "enableCustomScriptExtension": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Custom Script Extension nach dem Deployment ausführen"
+      }
+    },
+    "customScriptFileUris": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Öffentliche URL(s) der herunterzuladenden Script-Datei(en)"
+      }
+    },
+    "customScriptCommandToExecute": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Auszuführender Befehl, z. B. powershell -ExecutionPolicy Unrestricted -File Setup.ps1"
+      }
+    },
+    "customScriptStorageAccountName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Azure Storage Account Name für private Script-Blobs (optional)"
+      }
+    },
+    "customScriptStorageAccountKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Azure Storage Account Key für private Script-Blobs (optional)"
+      }
+    },
+    "timestamp": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "Wert erhöhen, um die Custom Script Extension bei erneutem Deployment zu erzwingen"
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {},
+      "metadata": {
+        "description": "Optionale Resource Tags fuer die VM"
+      }
+    },
+    "privateIPAddress": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Statische private IP-Adresse fuer die VM (leer = DHCP)"
+      }
+    }
+  },
+  "variables": {
+    "customLocationId": "[parameters('customLocationName')]",
+    "logicalNetworkId": "[parameters('hciLogicalNetworkName')]",
+    "imageId": "[parameters('hciImageName')]",
+    "nicName": "[concat(parameters('vmName'), '-nic')]",
+    "domainJoinExtensionName": "[concat(parameters('vmName'), '/joindomain')]",
+    "customScriptExtensionName": "[concat(parameters('vmName'), '/CustomScriptExtension')]"
+  },
+  "resources": [
+    {
+      "comments": "── Network Interface ──────────────────────────────────────────────────────",
+      "type": "Microsoft.AzureStackHCI/networkInterfaces",
+      "apiVersion": "2024-01-01",
+      "name": "[variables('nicName')]",
+      "location": "[resourceGroup().location]",
+      "extendedLocation": {
+        "type": "CustomLocation",
+        "name": "[variables('customLocationId')]"
+      },
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "subnet": {
+                "id": "[variables('logicalNetworkId')]"
+              },
+              "privateIPAddress": "[if(empty(parameters('privateIPAddress')), json('null'), parameters('privateIPAddress'))]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "comments": "── Data Disks (copy loop) ─────────────────────────────────────────────────",
+      "condition": "[greater(length(parameters('dataDisksParams')), 0)]",
+      "type": "Microsoft.AzureStackHCI/virtualHardDisks",
+      "apiVersion": "2024-01-01",
+      "copy": {
+        "name": "dataDiskCopy",
+        "count": "[length(parameters('dataDisksParams'))]"
+      },
+      "name": "[parameters('dataDisksParams')[copyIndex()].name]",
+      "location": "[resourceGroup().location]",
+      "extendedLocation": {
+        "type": "CustomLocation",
+        "name": "[variables('customLocationId')]"
+      },
+      "properties": {
+        "diskSizeGB": "[parameters('dataDisksParams')[copyIndex()].diskSizeGB]",
+        "dynamic": "[if(contains(parameters('dataDisksParams')[copyIndex()], 'dynamic'), parameters('dataDisksParams')[copyIndex()].dynamic, true())]"
+      }
+    },
+    {
+      "comments": "── Arc Machine (tracked resource required for VM instance scope) ──────────",
+      "type": "Microsoft.HybridCompute/machines",
+      "apiVersion": "2023-10-03-preview",
+      "name": "[parameters('vmName')]",
+      "location": "[resourceGroup().location]",
+      "kind": "HCI",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {},
+      "tags": "[parameters('tags')]"
+    },
+    {
+      "comments": "── Virtual Machine Instance ───────────────────────────────────────────────",
+      "type": "Microsoft.AzureStackHCI/virtualMachineInstances",
+      "apiVersion": "2024-01-01",
+      "name": "default",
+      "scope": "[concat('Microsoft.HybridCompute/machines/', parameters('vmName'))]",
+      "extendedLocation": {
+        "type": "CustomLocation",
+        "name": "[variables('customLocationId')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.HybridCompute/machines', parameters('vmName'))]",
+        "[resourceId('Microsoft.AzureStackHCI/networkInterfaces', variables('nicName'))]",
+        "dataDiskCopy"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "Custom",
+          "processors": "[parameters('vCPUCount')]",
+          "memoryMB": "[parameters('memoryMB')]"
+        },
+        "osProfile": {
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]",
+          "windowsConfiguration": {
+            "provisionVMAgent": true,
+            "enableAutomaticUpdates": true
+          }
+        },
+        "storageProfile": {
+          "imageReference": {
+            "id": "[variables('imageId')]"
+          },
+          "copy": [
+            {
+              "name": "dataDisks",
+              "count": "[length(parameters('dataDisksParams'))]",
+              "input": {
+                "id": "[resourceId('Microsoft.AzureStackHCI/virtualHardDisks', parameters('dataDisksParams')[copyIndex('dataDisks')].name)]"
+              }
+            }
+          ]
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.AzureStackHCI/networkInterfaces', variables('nicName'))]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "comments": "── Domain Join Extension (conditional) ───────────────────────────────────",
+      "condition": "[parameters('enableDomainJoin')]",
+      "type": "Microsoft.HybridCompute/machines/extensions",
+      "apiVersion": "2023-10-03-preview",
+      "name": "[variables('domainJoinExtensionName')]",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        "[resourceId('Microsoft.HybridCompute/machines', parameters('vmName'))]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Compute",
+        "type": "JsonADDomainExtension",
+        "typeHandlerVersion": "1.3",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "name": "[parameters('domainFqdn')]",
+          "ouPath": "[parameters('domainOuPath')]",
+          "user": "[parameters('domainJoinUsername')]",
+          "restart": "true",
+          "options": "3"
+        },
+        "protectedSettings": {
+          "password": "[parameters('domainJoinPassword')]"
+        }
+      }
+    },
+    {
+      "comments": "── Custom Script Extension – ohne Domain Join (condition: CSE=true, DJ=false)",
+      "condition": "[and(parameters('enableCustomScriptExtension'), not(parameters('enableDomainJoin')))]",
+      "type": "Microsoft.HybridCompute/machines/extensions",
+      "apiVersion": "2023-10-03-preview",
+      "name": "[variables('customScriptExtensionName')]",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        "[resourceId('Microsoft.HybridCompute/machines', parameters('vmName'))]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Compute",
+        "type": "CustomScriptExtension",
+        "typeHandlerVersion": "1.10",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "fileUris": "[parameters('customScriptFileUris')]",
+          "timestamp": "[parameters('timestamp')]"
+        },
+        "protectedSettings": {
+          "commandToExecute": "[parameters('customScriptCommandToExecute')]",
+          "storageAccountName": "[parameters('customScriptStorageAccountName')]",
+          "storageAccountKey": "[parameters('customScriptStorageAccountKey')]"
+        }
+      }
+    },
+    {
+      "comments": "── Custom Script Extension – nach Domain Join (condition: CSE=true, DJ=true)",
+      "condition": "[and(parameters('enableCustomScriptExtension'), parameters('enableDomainJoin'))]",
+      "type": "Microsoft.HybridCompute/machines/extensions",
+      "apiVersion": "2023-10-03-preview",
+      "name": "[variables('customScriptExtensionName')]",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        "[resourceId('Microsoft.HybridCompute/machines/extensions', parameters('vmName'), 'joindomain')]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Compute",
+        "type": "CustomScriptExtension",
+        "typeHandlerVersion": "1.10",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "fileUris": "[parameters('customScriptFileUris')]",
+          "timestamp": "[parameters('timestamp')]"
+        },
+        "protectedSettings": {
+          "commandToExecute": "[parameters('customScriptCommandToExecute')]",
+          "storageAccountName": "[parameters('customScriptStorageAccountName')]",
+          "storageAccountKey": "[parameters('customScriptStorageAccountKey')]"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "vmResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.HybridCompute/machines', parameters('vmName'))]"
+    },
+    "nicResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.AzureStackHCI/networkInterfaces', variables('nicName'))]"
+    }
+  }
+}
