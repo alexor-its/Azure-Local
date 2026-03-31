@@ -1,6 +1,20 @@
-#Requires -RunAsAdministrator
-# Setup.ps1 - Executed via Azure Custom Script Extension
-# Logs: C:\Windows\Temp\cse-setup.log
+# ======================================================================================
+# Script      : Setup.ps1
+# Description : Configure a en-US deployed VM with the region in GER
+#               Executed via Azure Arc Custom Script Extension
+#               Requires -RunAsAdministrator
+#               Logs: C:\Windows\Temp\cse-setup.log
+# --------------------------------------------------------------------------------------
+# Author      : Alexander Ortha
+# Company     : Alexander Ortha IT Solutions
+# Contact     : https://ortha-itsolutions.de/
+# Created     : 2026-03-25
+# Version     : 1.0.0
+# Copyright   : (c) 2026 Alexander Ortha IT Solutions. All rights reserved.
+# --------------------------------------------------------------------------------------
+# Code created by Alexander Ortha.
+# Development supported through AI-tools.
+# ======================================================================================
 
 param (
     [string]$InstallPath = "C:\Tools"
