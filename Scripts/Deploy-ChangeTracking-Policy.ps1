@@ -1,30 +1,43 @@
-
 <#
 .SYNOPSIS
-    Weist die Azure Policy Initiative "Enable ChangeTracking and Inventory for virtual machines"
+    Weist die Azure Policy Initiative "Enable ChangeTracking and Inventory for Arc-enabled virtual machines"
     auf mehrere Resource Groups zu und erstellt dabei automatisch Managed Identity & Remediation Tasks.
 
 .BESCHREIBUNG
-    Dieses Skript:
-      1. Prüft Voraussetzungen (Login, Subscription, DCR-ID)
-      2. Erstellt pro Resource Group ein Policy Assignment inkl. Managed Identity
-      3. Erstellt automatisch einen Remediation Task für bestehende VMs
+    Dieses Skript gilt AUSSCHLIESSLICH für Azure Arc-enabled Server (keine Azure VMs).
+    Es verwendet die Initiative: 53448c70-089b-4f52-8f38-89196d7f2de1
+
+    Die Initiative enthält 6 Policies (DINE = Deploy If Not Exists):
+      [Windows] Configure Arc-enabled machines to install AMA for ChangeTracking
+      [Linux]   Configure Arc-enabled machines to install AMA for ChangeTracking
+      [Windows] Configure Arc-enabled machines to be associated with a DCR for ChangeTracking
+      [Linux]   Configure Arc-enabled machines to be associated with a DCR for ChangeTracking
+      [Windows] Configure ChangeTracking Extension for Windows Arc-enabled machines
+      [Linux]   Configure ChangeTracking Extension for Linux Arc-enabled machines
+
+    Das Skript:
+      1. Prüft Voraussetzungen (Login, Subscription, DCR-ID, Pflichtfelder)
+      2. Erstellt pro Resource Group ein Policy Assignment (Arc-Initiative) inkl. System-Assigned Identity
+      3. Weist der Managed Identity die Contributor-Rolle auf RG-Ebene zu
+      4. Erstellt optional Remediation Tasks für bereits vorhandene Arc-Server
 
 .VORAUSSETZUNGEN
-    - Azure CLI installiert (az --version)
-    - Eingeloggt via: az login
-    - Contributor + Policy Contributor Rolle auf Subscription
-    - Eine bestehende Data Collection Rule (DCR) für Change Tracking
+    - Azure CLI installiert  (az --version)
+    - Eingeloggt via:        az login
+    - Rollen auf Subscription: Policy Contributor + Contributor (oder Owner)
+    - Bestehende Data Collection Rule (DCR) für Change Tracking (AMA-Schema)
+    - Arc-Server müssen in den Ziel-Resource-Groups onboarded sein
 
 .PARAMETER KONFIGURATION
-    Bitte die Variablen im Abschnitt "=== KONFIGURATION ===" anpassen.
+    Bitte den Abschnitt "=== KONFIGURATION ===" unten anpassen.
 
 .BEISPIEL
-    .\Deploy-ChangeTracking-Policy.ps1
+    .\Deploy-ChangeTracking-Arc-Policy.ps1
 
 .NOTES
-    Initiative ID : 92a36f05-ebc9-4bba-9128-b47ad2ea3354
-    Quelle        : https://learn.microsoft.com/azure/azure-change-tracking-inventory/enable-change-tracking-at-scale-policy
+    Arc Initiative ID : 53448c70-089b-4f52-8f38-89196d7f2de1
+    Quelle            : https://learn.microsoft.com/azure/azure-change-tracking-inventory/enable-change-tracking-at-scale-policy
+    Getestet mit      : Azure CLI 2.x, PowerShell 7+
 #>
 
 #Requires -Version 7.0
@@ -36,48 +49,51 @@
 # Azure Subscription ID
 $SubscriptionId = "<DEINE-SUBSCRIPTION-ID>"
 
-# Data Collection Rule Resource ID (aus Azure Portal: DCR -> JSON-Ansicht -> id)
+# Data Collection Rule Resource ID
+# Ermitteln: az monitor data-collection rule show --name <DCR-Name> --resource-group <RG> --query id -o tsv
 # Format: /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Insights/dataCollectionRules/<name>
 $DcrResourceId = "<DEINE-DCR-RESOURCE-ID>"
 
-# User-Assigned Managed Identity Resource ID (wird für DINE-Policies benötigt)
-# Format: /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<name>
-# Leer lassen ("") wenn System-Assigned Identity verwendet werden soll
-$UserAssignedIdentityId = ""
-
-# Resource Groups, auf die die Policy angewendet werden soll
+# Resource Groups mit Arc-Servern, auf die die Policy angewendet werden soll
 $ResourceGroups = @(
-    "rg-produktion",
-    "rg-entwicklung",
-    "rg-staging"
+    "rg-arc-produktion",
+    "rg-arc-entwicklung",
+    "rg-arc-dmz"
     # Weitere Resource Groups hier hinzufügen
 )
 
-# Azure Regionen, für die die Policy gilt (kommagetrennt, z.B. "germanywestcentral,westeurope")
-# Leer lassen für alle Regionen
+# Azure Regionen, in denen deine Arc-Server registriert sind
+# Kommagetrennte Liste, z.B. "germanywestcentral,westeurope,northeurope"
+# Leer lassen ("") = alle Regionen
 $ApplicableLocations = "germanywestcentral,westeurope,northeurope"
 
-# Präfix für den Assignment-Namen (max. 24 Zeichen gesamt inkl. RG-Name-Kürzel)
-$AssignmentPrefix = "CT-Inventory"
+# Region für die Managed Identity der Policy-Zuweisung
+# Sollte der Haupt-Region deiner Umgebung entsprechen
+$ManagedIdentityLocation = "germanywestcentral"
 
-# Remediation Task direkt nach Assignment erstellen? ($true / $false)
+# Remediation Tasks direkt nach Assignment erstellen?
+# $true  = bestehende Arc-Server werden sofort remediiert
+# $false = nur neue/geänderte Server werden durch die Policy erfasst
 $CreateRemediationTask = $true
 
 # ============================================================
 # === ENDE KONFIGURATION =====================================
 # ============================================================
 
-# Builtin Initiative ID für "Enable ChangeTracking and Inventory for virtual machines"
-$InitiativeId = "92a36f05-ebc9-4bba-9128-b47ad2ea3354"
+# Builtin Initiative ID: "Enable ChangeTracking and Inventory for Arc-enabled virtual machines"
+$ArcInitiativeId = "53448c70-089b-4f52-8f38-89196d7f2de1"
+
+# Präfix für Assignment- und Remediation-Namen
+$AssignmentPrefix = "CT-Arc"
 
 # ------------------------------------------------------------------
 # Hilfsfunktionen
 # ------------------------------------------------------------------
 function Write-Header {
     param([string]$Text)
-    Write-Host "`n$("=" * 60)" -ForegroundColor Cyan
+    Write-Host "`n$("=" * 65)" -ForegroundColor Cyan
     Write-Host "  $Text" -ForegroundColor Cyan
-    Write-Host "$("=" * 60)" -ForegroundColor Cyan
+    Write-Host "$("=" * 65)" -ForegroundColor Cyan
 }
 
 function Write-Step {
@@ -87,7 +103,17 @@ function Write-Step {
 
 function Write-Success {
     param([string]$Text)
-    Write-Host "  [OK] $Text" -ForegroundColor Green
+    Write-Host "  [OK]     $Text" -ForegroundColor Green
+}
+
+function Write-Info {
+    param([string]$Text)
+    Write-Host "  [INFO]   $Text" -ForegroundColor DarkYellow
+}
+
+function Write-Warn {
+    param([string]$Text)
+    Write-Host "  [WARN]   $Text" -ForegroundColor Magenta
 }
 
 function Write-Err {
@@ -99,6 +125,20 @@ function Write-Err {
 # Voraussetzungen prüfen
 # ------------------------------------------------------------------
 Write-Header "Voraussetzungen prüfen"
+
+# Pflichtparameter prüfen (vor allem anderen)
+if ($SubscriptionId -like "*<*") {
+    Write-Err "Bitte 'SubscriptionId' in der Konfiguration eintragen!"
+    exit 1
+}
+if ($DcrResourceId -like "*<*") {
+    Write-Err "Bitte 'DcrResourceId' in der Konfiguration eintragen!"
+    exit 1
+}
+if ($ResourceGroups.Count -eq 0) {
+    Write-Err "Bitte mindestens eine Resource Group in 'ResourceGroups' eintragen!"
+    exit 1
+}
 
 # Azure CLI vorhanden?
 Write-Step "Prüfe Azure CLI..."
@@ -122,99 +162,112 @@ Write-Success "Eingeloggt als: $($account.user.name)"
 
 # Subscription setzen
 Write-Step "Setze Subscription: $SubscriptionId"
-$null = az account set --subscription $SubscriptionId
+$null = az account set --subscription $SubscriptionId 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Err "Subscription '$SubscriptionId' nicht gefunden oder kein Zugriff."
     exit 1
 }
 Write-Success "Subscription aktiv: $SubscriptionId"
 
-# Pflichtparameter prüfen
-if ($SubscriptionId -like "*<*") {
-    Write-Err "Bitte 'SubscriptionId' in der Konfiguration eintragen!"
+# Arc Initiative Definition laden und prüfen
+Write-Step "Lade Arc Policy Initiative Definition (ID: $ArcInitiativeId)..."
+$arcInitiativeDef = az policy set-definition show --name $ArcInitiativeId 2>&1 | ConvertFrom-Json
+if (-not $arcInitiativeDef -or $LASTEXITCODE -ne 0) {
+    Write-Err "Arc Initiative '$ArcInitiativeId' konnte nicht geladen werden."
     exit 1
 }
-if ($DcrResourceId -like "*<*") {
-    Write-Err "Bitte 'DcrResourceId' in der Konfiguration eintragen!"
-    exit 1
-}
-
-# Initiative Definition holen
-Write-Step "Lade Policy Initiative Definition..."
-$initiativeDef = az policy set-definition show --name $InitiativeId 2>&1 | ConvertFrom-Json
-if (-not $initiativeDef) {
-    Write-Err "Initiative '$InitiativeId' konnte nicht geladen werden."
-    exit 1
-}
-Write-Success "Initiative gefunden: $($initiativeDef.displayName)"
+Write-Success "Initiative gefunden: $($arcInitiativeDef.displayName)"
 
 # ------------------------------------------------------------------
-# Assignment-Parameter vorbereiten
+# Parameter vorbereiten
 # ------------------------------------------------------------------
-$locationParam = if ($ApplicableLocations) {
-    $ApplicableLocations -split "," | ForEach-Object { $_.Trim() } | ConvertTo-Json -Compress
-} else { "[]" }
 
-$identityParam = if ($UserAssignedIdentityId -and $UserAssignedIdentityId -ne "") {
-    "bringYourOwnUserAssignedManagedIdentity=true userAssignedIdentityResourceId=$UserAssignedIdentityId"
+# Locations als JSON-Array
+$locationParam = if ($ApplicableLocations -and $ApplicableLocations -ne "") {
+    $ApplicableLocations -split "," | ForEach-Object { "`"$($_.Trim())`"" } | Join-String -Separator ","
+    $locationJson = "[" + ($ApplicableLocations -split "," | ForEach-Object { "`"$($_.Trim())`"" } | Join-String -Separator ",") + "]"
 } else {
-    "bringYourOwnUserAssignedManagedIdentity=false"
+    $locationJson = "[]"
 }
 
 # ------------------------------------------------------------------
-# Assignments erstellen
+# Assignments erstellen (Arc)
 # ------------------------------------------------------------------
-Write-Header "Policy Assignments erstellen"
+Write-Header "Arc Policy Assignments erstellen"
+Write-Host "  Initiative : $($arcInitiativeDef.displayName)" -ForegroundColor White
+Write-Host "  ID         : $ArcInitiativeId" -ForegroundColor DarkGray
+Write-Host "  Scope      : Resource Group (je RG ein Assignment)" -ForegroundColor White
+Write-Host ""
 
-$successCount = 0
-$errorCount = 0
-$assignmentIds = @{}
+$successCount   = 0
+$errorCount     = 0
+$skippedCount   = 0
+$assignmentMap  = @{}   # rg -> assignmentName
 
 foreach ($rg in $ResourceGroups) {
 
     Write-Step "Verarbeite Resource Group: $rg"
 
-    # Prüfen ob RG existiert
-    $rgExists = az group show --name $rg --subscription $SubscriptionId 2>&1 | ConvertFrom-Json
-    if (-not $rgExists) {
+    # RG-Existenz prüfen
+    $rgCheck = az group show --name $rg --subscription $SubscriptionId 2>&1
+    if ($LASTEXITCODE -ne 0) {
         Write-Err "Resource Group '$rg' nicht gefunden – überspringe."
         $errorCount++
         continue
     }
 
+    # Arc-Server in dieser RG zählen (informativer Hinweis)
+    $arcServers = az connectedmachine list --resource-group $rg --subscription $SubscriptionId `
+        --query "length(@)" -o tsv 2>&1
+    if ($LASTEXITCODE -eq 0 -and $arcServers -match '^\d+$') {
+        Write-Host "  Arc-Server in dieser RG: $arcServers" -ForegroundColor White
+        if ([int]$arcServers -eq 0) {
+            Write-Warn "Keine Arc-Server gefunden – Assignment wird trotzdem erstellt (gilt auch für zukünftige Server)."
+        }
+    }
+
     $scope = "/subscriptions/$SubscriptionId/resourceGroups/$rg"
 
-    # Assignment-Name generieren (max 64 Zeichen, keine Sonderzeichen)
-    $rgShort = $rg -replace "[^a-zA-Z0-9]", "" | Select-Object -First 1
-    $rgShort = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min($rg.Length, 20))
-    $assignmentName = "$AssignmentPrefix-$rgShort"
-    $displayName    = "ChangeTracking & Inventory - $rg"
+    # Assignment-Namen sicher generieren (max. 64 Zeichen, nur alphanumerisch + Bindestrich)
+    $rgClean       = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($rg -replace "[^a-zA-Z0-9-]","").Length, 24))
+    $assignmentName = "$AssignmentPrefix-$rgClean"
+    $displayName    = "[Arc] ChangeTracking & Inventory - $rg"
 
-    # Prüfen ob Assignment bereits existiert
-    $existing = az policy assignment show --name $assignmentName --scope $scope 2>&1
+    # Existiert das Assignment bereits?
+    $existingAssign = az policy assignment show --name $assignmentName --scope $scope 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "  [INFO] Assignment '$assignmentName' existiert bereits – überspringe." -ForegroundColor DarkYellow
-        $existingObj = $existing | ConvertFrom-Json
-        $assignmentIds[$rg] = $existingObj.id
+        $existingObj = $existingAssign | ConvertFrom-Json
+        Write-Info "Assignment '$assignmentName' existiert bereits – überspringe."
+        $assignmentMap[$rg] = $assignmentName
+        $skippedCount++
         continue
     }
 
     Write-Host "  Erstelle Assignment: $assignmentName" -ForegroundColor White
 
-    # Assignment erstellen mit System-Assigned Managed Identity (benötigt für DINE)
+    # Policy Assignment erstellen
+    # Die Arc-Initiative benötigt: dcrResourceId + listOfApplicableLocations
+    # System-Assigned Managed Identity ist für DINE-Policies zwingend erforderlich
+    $paramsJson = @"
+{
+    "dcrResourceId": {
+        "value": "$DcrResourceId"
+    },
+    "listOfApplicableLocations": {
+        "value": $locationJson
+    }
+}
+"@
+
     $assignResult = az policy assignment create `
         --name $assignmentName `
         --display-name $displayName `
-        --policy-set-definition $InitiativeId `
+        --description "Aktiviert Change Tracking und Inventory fuer Azure Arc-Server in $rg (DINE-Policy)" `
+        --policy-set-definition $ArcInitiativeId `
         --scope $scope `
         --mi-system-assigned `
-        --location "westeurope" `
-        --params "{
-            `"dcrResourceId`": {`"value`": `"$DcrResourceId`"},
-            `"bringYourOwnUserAssignedManagedIdentity`": {`"value`": $(if ($UserAssignedIdentityId) { 'true' } else { 'false' })},
-            `"listOfApplicableLocations`": {`"value`": $locationParam}
-            $(if ($UserAssignedIdentityId) { ",`"userAssignedIdentityResourceId`": {`"value`": `"$UserAssignedIdentityId`"}" })
-        }" 2>&1
+        --location $ManagedIdentityLocation `
+        --params $paramsJson 2>&1
 
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Fehler beim Erstellen des Assignments für '$rg':"
@@ -224,17 +277,21 @@ foreach ($rg in $ResourceGroups) {
     }
 
     $assignObj = $assignResult | ConvertFrom-Json
-    $assignmentIds[$rg] = $assignObj.id
+    $assignmentMap[$rg] = $assignmentName
     Write-Success "Assignment erstellt: $($assignObj.id)"
 
-    # Rollenzuweisung für Managed Identity (Contributor auf RG-Ebene für DINE)
-    Write-Host "  Weise Contributor-Rolle der Managed Identity zu..." -ForegroundColor White
+    # ------------------------------------------------------------------
+    # Rollenzuweisung für die Managed Identity
+    # Die DINE-Policies benötigen Contributor-Rechte um Ressourcen zu deployen
+    # ------------------------------------------------------------------
     $principalId = $assignObj.identity.principalId
 
     if ($principalId) {
-        # Kurz warten bis Identity bereit ist
-        Start-Sleep -Seconds 15
+        Write-Host "  Warte auf Bereitstellung der Managed Identity..." -ForegroundColor DarkGray
+        Start-Sleep -Seconds 20
 
+        # Contributor auf RG-Ebene (für Extension-Deployment auf Arc-Servern)
+        Write-Host "  Weise Contributor-Rolle zu (Principal: $principalId)..." -ForegroundColor White
         $roleResult = az role assignment create `
             --role "Contributor" `
             --assignee-object-id $principalId `
@@ -242,28 +299,47 @@ foreach ($rg in $ResourceGroups) {
             --scope $scope 2>&1
 
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "  [WARN] Rollenzuweisung fehlgeschlagen (ggf. manuell vergeben): $roleResult" -ForegroundColor DarkYellow
+            Write-Warn "Contributor-Rollenzuweisung fehlgeschlagen – bitte manuell vergeben:"
+            Write-Host "  az role assignment create --role Contributor --assignee-object-id $principalId --scope $scope" -ForegroundColor DarkGray
         } else {
-            Write-Success "Contributor-Rolle zugewiesen (Principal: $principalId)"
+            Write-Success "Contributor-Rolle zugewiesen"
         }
+
+        # Connected Machine Contributor (für Arc-spezifische Operationen)
+        Write-Host "  Weise 'Connected Machine Resource Administrator'-Rolle zu..." -ForegroundColor White
+        $arcRoleResult = az role assignment create `
+            --role "Connected Machine Resource Administrator" `
+            --assignee-object-id $principalId `
+            --assignee-principal-type ServicePrincipal `
+            --scope $scope 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Arc-Rollenzuweisung fehlgeschlagen – bei Bedarf manuell vergeben:"
+            Write-Host "  az role assignment create --role 'Connected Machine Resource Administrator' --assignee-object-id $principalId --scope $scope" -ForegroundColor DarkGray
+        } else {
+            Write-Success "Connected Machine Resource Administrator-Rolle zugewiesen"
+        }
+
+    } else {
+        Write-Warn "Keine Principal-ID in der Antwort – Rollenzuweisung übersprungen."
     }
 
     $successCount++
 }
 
 # ------------------------------------------------------------------
-# Remediation Tasks erstellen
+# Remediation Tasks erstellen (für bereits vorhandene Arc-Server)
 # ------------------------------------------------------------------
-if ($CreateRemediationTask -and $assignmentIds.Count -gt 0) {
+if ($CreateRemediationTask -and $assignmentMap.Count -gt 0) {
 
-    Write-Header "Remediation Tasks erstellen (für bestehende VMs)"
+    Write-Header "Remediation Tasks erstellen (für bestehende Arc-Server)"
 
-    foreach ($rg in $assignmentIds.Keys) {
+    foreach ($rg in $assignmentMap.Keys) {
 
-        $scope = "/subscriptions/$SubscriptionId/resourceGroups/$rg"
-        $rgShort = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min($rg.Length, 20))
-        $assignmentName = "$AssignmentPrefix-$rgShort"
-        $remediationName = "remediate-$rgShort-$(Get-Date -Format 'yyyyMMddHHmm')"
+        $assignmentName  = $assignmentMap[$rg]
+        $timestamp       = Get-Date -Format 'yyyyMMddHHmm'
+        $rgClean         = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($rg -replace "[^a-zA-Z0-9-]","").Length, 20))
+        $remediationName = "rem-arc-$rgClean-$timestamp"
 
         Write-Step "Erstelle Remediation Task für: $rg"
 
@@ -273,7 +349,8 @@ if ($CreateRemediationTask -and $assignmentIds.Count -gt 0) {
             --resource-group $rg 2>&1
 
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "  [WARN] Remediation Task fehlgeschlagen: $remResult" -ForegroundColor DarkYellow
+            Write-Warn "Remediation Task fehlgeschlagen (kann auch bedeuten, dass bereits compliant):"
+            Write-Host "  $remResult" -ForegroundColor DarkGray
         } else {
             Write-Success "Remediation Task gestartet: $remediationName"
         }
@@ -285,27 +362,44 @@ if ($CreateRemediationTask -and $assignmentIds.Count -gt 0) {
 # ------------------------------------------------------------------
 Write-Header "Zusammenfassung"
 Write-Host ""
-Write-Host "  Resource Groups verarbeitet : $($ResourceGroups.Count)" -ForegroundColor White
-Write-Host "  Erfolgreich                 : $successCount" -ForegroundColor Green
-Write-Host "  Fehler                      : $errorCount" -ForegroundColor $(if ($errorCount -gt 0) { "Red" } else { "Green" })
+Write-Host "  Ziel         : Azure Arc-enabled Server (KEINE Azure VMs)" -ForegroundColor White
+Write-Host "  Initiative   : $($arcInitiativeDef.displayName)" -ForegroundColor White
+Write-Host "  Initiative ID: $ArcInitiativeId" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  Resource Groups gesamt    : $($ResourceGroups.Count)" -ForegroundColor White
+Write-Host "  Neu erstellt (Assignments): $successCount"            -ForegroundColor Green
+Write-Host "  Bereits vorhanden         : $skippedCount"            -ForegroundColor DarkYellow
+Write-Host "  Fehler                    : $errorCount"              -ForegroundColor $(if ($errorCount -gt 0) { "Red" } else { "Green" })
 Write-Host ""
 
-if ($successCount -gt 0) {
+if (($successCount + $skippedCount) -gt 0) {
     Write-Host "  Nächste Schritte:" -ForegroundColor Cyan
-    Write-Host "  1. Azure Portal -> Policy -> Compliance prüfen (kann ~30min dauern)" -ForegroundColor White
-    Write-Host "  2. Remediation Tasks unter Policy -> Remediation -> Tasks prüfen" -ForegroundColor White
-    Write-Host "  3. Nach Deployment: Change Tracking & Inventory Center -> Machines prüfen" -ForegroundColor White
+    Write-Host "  1. Policy Compliance prüfen (~30 min):  Azure Portal -> Policy -> Compliance" -ForegroundColor White
+    Write-Host "  2. Remediation Tasks prüfen:            Azure Portal -> Policy -> Remediation -> Tasks" -ForegroundColor White
+    Write-Host "  3. Arc-Server prüfen:                   Change Tracking & Inventory Center -> Machines" -ForegroundColor White
+    Write-Host "  4. Extensions prüfen:                   Azure Portal -> Arc-Server -> Extensions" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Erwartete Extensions auf Arc-Servern nach erfolgreichem Deployment:" -ForegroundColor Cyan
+    Write-Host "  - AzureMonitorWindowsAgent / AzureMonitorLinuxAgent" -ForegroundColor White
+    Write-Host "  - ChangeTracking-Windows / ChangeTracking-Linux" -ForegroundColor White
     Write-Host ""
 }
 
 if ($errorCount -gt 0) {
-    Write-Host "  Bei Fehlern prüfen:" -ForegroundColor Yellow
-    Write-Host "  - Hast du 'Policy Contributor' Rolle auf der Subscription?" -ForegroundColor White
-    Write-Host "  - Ist die DCR Resource ID korrekt?" -ForegroundColor White
-    Write-Host "  - Existieren alle Resource Groups?" -ForegroundColor White
+    Write-Host "  Häufige Fehlerursachen:" -ForegroundColor Yellow
+    Write-Host "  - Fehlende Rolle: 'Policy Contributor' auf der Subscription" -ForegroundColor White
+    Write-Host "  - Falsche DCR Resource ID (az monitor data-collection rule list -o table)" -ForegroundColor White
+    Write-Host "  - Arc-Server nicht korrekt onboarded (az connectedmachine list -o table)" -ForegroundColor White
     Write-Host ""
 }
 
-Write-Host "  Assignments auflisten:" -ForegroundColor Cyan
-Write-Host "  az policy assignment list --subscription $SubscriptionId --query `"[?contains(displayName,'ChangeTracking')]`"" -ForegroundColor DarkGray
+Write-Host "  Nützliche Befehle:" -ForegroundColor Cyan
+Write-Host "  # Alle Arc-Assignments anzeigen:" -ForegroundColor DarkGray
+Write-Host "  az policy assignment list --subscription $SubscriptionId --query `"[?contains(displayName,'Arc')]`" -o table" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  # Arc-Server in einer RG anzeigen:" -ForegroundColor DarkGray
+Write-Host "  az connectedmachine list --resource-group <RG-NAME> -o table" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  # DCR-Liste anzeigen:" -ForegroundColor DarkGray
+Write-Host "  az monitor data-collection rule list --subscription $SubscriptionId --query `"[].{Name:name, ID:id}`" -o table" -ForegroundColor DarkGray
 Write-Host ""
