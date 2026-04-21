@@ -1,7 +1,8 @@
+
 <#
 .SYNOPSIS
     Weist die Azure Policy Initiative "Enable ChangeTracking and Inventory for Arc-enabled virtual machines"
-    auf mehrere Resource Groups zu und erstellt dabei automatisch Managed Identity & Remediation Tasks.
+    auf mehrere Resource Groups zu und erstellt dabei automatisch Managed Identity und Remediation Tasks.
 
 .BESCHREIBUNG
     Dieses Skript gilt AUSSCHLIESSLICH für Azure Arc-enabled Server (keine Azure VMs).
@@ -182,10 +183,10 @@ Write-Success "Initiative gefunden: $($arcInitiativeDef.displayName)"
 # Parameter vorbereiten
 # ------------------------------------------------------------------
 
-# Locations als JSON-Array
-$locationParam = if ($ApplicableLocations -and $ApplicableLocations -ne "") {
-    $ApplicableLocations -split "," | ForEach-Object { "`"$($_.Trim())`"" } | Join-String -Separator ","
-    $locationJson = "[" + ($ApplicableLocations -split "," | ForEach-Object { "`"$($_.Trim())`"" } | Join-String -Separator ",") + "]"
+# Locations als JSON-Array aufbauen
+if ($ApplicableLocations -and $ApplicableLocations -ne "") {
+    $locationEntries = $ApplicableLocations -split "," | ForEach-Object { "`"$($_.Trim())`"" }
+    $locationJson    = "[" + ($locationEntries -join ",") + "]"
 } else {
     $locationJson = "[]"
 }
@@ -231,7 +232,7 @@ foreach ($rg in $ResourceGroups) {
     # Assignment-Namen sicher generieren (max. 64 Zeichen, nur alphanumerisch + Bindestrich)
     $rgClean       = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($rg -replace "[^a-zA-Z0-9-]","").Length, 24))
     $assignmentName = "$AssignmentPrefix-$rgClean"
-    $displayName    = "[Arc] ChangeTracking & Inventory - $rg"
+    $displayName    = "[Arc] ChangeTracking and Inventory - $rg"
 
     # Existiert das Assignment bereits?
     $existingAssign = az policy assignment show --name $assignmentName --scope $scope 2>&1
@@ -376,7 +377,7 @@ if (($successCount + $skippedCount) -gt 0) {
     Write-Host "  Nächste Schritte:" -ForegroundColor Cyan
     Write-Host "  1. Policy Compliance prüfen (~30 min):  Azure Portal -> Policy -> Compliance" -ForegroundColor White
     Write-Host "  2. Remediation Tasks prüfen:            Azure Portal -> Policy -> Remediation -> Tasks" -ForegroundColor White
-    Write-Host "  3. Arc-Server prüfen:                   Change Tracking & Inventory Center -> Machines" -ForegroundColor White
+    Write-Host "  3. Arc-Server prüfen:                   Change Tracking and Inventory Center -> Machines" -ForegroundColor White
     Write-Host "  4. Extensions prüfen:                   Azure Portal -> Arc-Server -> Extensions" -ForegroundColor White
     Write-Host ""
     Write-Host "  Erwartete Extensions auf Arc-Servern nach erfolgreichem Deployment:" -ForegroundColor Cyan
