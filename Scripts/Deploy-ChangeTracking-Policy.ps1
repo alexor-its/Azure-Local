@@ -306,18 +306,18 @@ foreach ($rg in $ResourceGroups) {
         }
 
         # Connected Machine Contributor (für Arc-spezifische Operationen)
-        Write-Host "  Weise 'Connected Machine Resource Administrator'-Rolle zu..." -ForegroundColor White
+        Write-Host "  Weise 'Azure Connected Machine Resource Administrator'-Rolle zu..." -ForegroundColor White
         $arcRoleResult = az role assignment create `
-            --role "Connected Machine Resource Administrator" `
+            --role "Azure Connected Machine Resource Administrator" `
             --assignee-object-id $principalId `
             --assignee-principal-type ServicePrincipal `
             --scope $scope 2>&1
 
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "Arc-Rollenzuweisung fehlgeschlagen – bei Bedarf manuell vergeben:"
-            Write-Host "  az role assignment create --role 'Connected Machine Resource Administrator' --assignee-object-id $principalId --scope $scope" -ForegroundColor DarkGray
+            Write-Host "  az role assignment create --role 'Azure Connected Machine Resource Administrator' --assignee-object-id $principalId --scope $scope" -ForegroundColor DarkGray
         } else {
-            Write-Success "Connected Machine Resource Administrator-Rolle zugewiesen"
+            Write-Success "Azure Connected Machine Resource Administrator-Rolle zugewiesen"
         }
 
     } else {
