@@ -1,4 +1,3 @@
-
 <#
 .SYNOPSIS
     Weist die Azure Policy Initiative "Enable ChangeTracking and Inventory for Arc-enabled virtual machines"
@@ -247,18 +246,15 @@ foreach ($rg in $ResourceGroups) {
     Write-Host "  Erstelle Assignment: $assignmentName" -ForegroundColor White
 
     # Policy Assignment erstellen
-    # Die Arc-Initiative benötigt: dcrResourceId + listOfApplicableLocations
-    # System-Assigned Managed Identity ist für DINE-Policies zwingend erforderlich
-    $paramsJson = @"
-{
-    "dcrResourceId": {
-        "value": "$DcrResourceId"
-    },
-    "listOfApplicableLocations": {
-        "value": $locationJson
+    # Die Arc-Initiative benoetigt: dcrResourceId + listOfApplicableLocations
+    # System-Assigned Managed Identity ist fuer DINE-Policies zwingend erforderlich
+    # Params als temporaere JSON-Datei schreiben (verhindert Shell-Parsing-Fehler bei --params)
+    $paramsObject = [ordered]@{
+        dcrResourceId             = @{ value = $DcrResourceId }
+        listOfApplicableLocations = @{ value = @($ApplicableLocations -split "," | ForEach-Object { $_.Trim() }) }
     }
-}
-"@
+    $paramsTempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "ct-arc-params-$($rg -replace '[^a-zA-Z0-9]','').json")
+    $paramsObject | ConvertTo-Json -Depth 5 | Set-Content -Path $paramsTempFile -Encoding UTF8
 
     $assignResult = az policy assignment create `
         --name $assignmentName `
@@ -268,7 +264,10 @@ foreach ($rg in $ResourceGroups) {
         --scope $scope `
         --mi-system-assigned `
         --location $ManagedIdentityLocation `
-        --params $paramsJson 2>&1
+        --params "@$paramsTempFile" 2>&1
+
+    # Temp-Datei aufraeumen
+    Remove-Item -Path $paramsTempFile -ErrorAction SilentlyContinue
 
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Fehler beim Erstellen des Assignments für '$rg':"
