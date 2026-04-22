@@ -4,16 +4,21 @@
 # und Ressourcengruppen im aktuellen Subscription
 # ============================================================
 
-param(
-    [Parameter(Mandatory = $false)]
-    [string]$SubscriptionId,
+# ----------------------------------------------------------
+# ⚙️  KONFIGURATION – hier anpassen
+# ----------------------------------------------------------
 
-    [Parameter(Mandatory = $false)]
-    [switch]$IncludeResourceGroups,
+# Subscription ID (leer lassen = aktive Subscription wird verwendet)
+$SubscriptionId = ""
 
-    [Parameter(Mandatory = $false)]
-    [switch]$DryRun
-)
+# Ressourcengruppen ebenfalls berücksichtigen? ($true / $false)
+$IncludeResourceGroups = $false
+
+# Nur anzeigen was entfernt würde, ohne Änderungen vorzunehmen? ($true / $false)
+$DryRun = $false
+
+# ----------------------------------------------------------
+
 
 # ----------------------------------------------------------
 # Login-Prüfung
@@ -24,8 +29,8 @@ if (-not $account) {
     az login | Out-Null
 }
 
-# Subscription setzen (falls angegeben)
-if ($SubscriptionId) {
+# Subscription setzen
+if ($SubscriptionId -ne "") {
     az account set --subscription $SubscriptionId | Out-Null
     Write-Host "✅ Subscription gesetzt: $SubscriptionId" -ForegroundColor Cyan
 } else {
@@ -60,7 +65,7 @@ if ($IncludeResourceGroups) {
 Write-Host ""
 Write-Host "🏷️  Sammle alle vorhandenen Tags..." -ForegroundColor Cyan
 
-$tagMap  = @{}
+$tagMap   = @{}
 $allItems = @($resources) + @($resourceGroups)
 $total    = $allItems.Count
 $counter  = 0
@@ -194,7 +199,7 @@ foreach ($resource in $resources) {
         -ResourceId   $resource.id `
         -ResourceName "$($resource.name) [$($resource.type)]" `
         -TagKey       $TagName `
-        -IsDryRun     $DryRun.IsPresent
+        -IsDryRun     $DryRun
 
     switch ($status) {
         "removed" { $totalRemoved++ }
@@ -210,7 +215,7 @@ if ($IncludeResourceGroups) {
             -ResourceId   $rg.id `
             -ResourceName "RG: $($rg.name)" `
             -TagKey       $TagName `
-            -IsDryRun     $DryRun.IsPresent
+            -IsDryRun     $DryRun
 
         switch ($status) {
             "removed" { $totalRemoved++ }
