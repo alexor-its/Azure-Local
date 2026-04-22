@@ -42,41 +42,44 @@ if ($DryRun) {
 }
 
 # ----------------------------------------------------------
-# Tag Key-Value-Pairs direkt aus der Subscription laden
-# (schnell – kein Iterieren über alle Ressourcen)
+# Alle Tag Key-Value-Pairs via Resource Graph sammeln
+# (ein einzelner API-Call, keine Iteration über Ressourcen)
 # ----------------------------------------------------------
-Write-Host "🏷️  Lade alle Tag Key-Value-Pairs der Subscription..." -ForegroundColor Cyan
+Write-Host "🏷️  Lade alle Tag Key-Value-Pairs via Resource Graph..." -ForegroundColor Cyan
 
-$allTags = az tag list --subscription $SubscriptionId | ConvertFrom-Json
+# Resource Graph Extension sicherstellen
+az extension add --name resource-graph --only-show-errors 2>$null
 
-if (-not $allTags -or $allTags.Count -eq 0) {
+$graphQuery = @"
+Resources
+| where isnotempty(tags)
+| mvexpand bagexpansion=array tags
+| extend tagKey   = tostring(tags[0])
+| extend tagValue = tostring(tags[1])
+| where isnotempty(tagKey)
+| summarize count() by tagKey, tagValue
+| order by tagKey asc, tagValue asc
+"@
+
+$graphResult = az graph query `
+    -q $graphQuery `
+    --subscriptions $SubscriptionId `
+    --first 1000 `
+    -o json 2>$null | ConvertFrom-Json
+
+if (-not $graphResult -or $graphResult.count -eq 0) {
     Write-Host "❌ Keine Tags in der Subscription gefunden. Script wird beendet." -ForegroundColor Red
     exit 0
 }
 
-# Alle Key-Value-Pairs aufbauen
 $pairList = @()
-foreach ($tag in $allTags) {
-    $tagName = $tag.tagName
-    if ($tag.values -and $tag.values.Count -gt 0) {
-        foreach ($val in $tag.values) {
-            $pairList += @{
-                Name  = $tagName
-                Value = $val.tagValue
-                Count = $val.count.value
-            }
-        }
-    } else {
-        # Tag ohne Values
-        $pairList += @{
-            Name  = $tagName
-            Value = ""
-            Count = $tag.count.value
-        }
+foreach ($row in $graphResult.data) {
+    $pairList += @{
+        Name  = $row.tagKey
+        Value = $row.tagValue
+        Count = $row.count_
     }
 }
-
-$pairList = $pairList | Sort-Object { $_.Name + "||" + $_.Value }
 
 Write-Host "   → $($pairList.Count) Tag Key-Value-Pairs gefunden." -ForegroundColor Gray
 
@@ -109,9 +112,9 @@ do {
         $selectedPair = $pairList[$selectedIndex - 1]
         $TagName      = $selectedPair.Name
         $TagValue     = $selectedPair.Value
+        $displayValue = if ($TagValue -ne "") { $TagValue } else { "(kein Wert)" }
         Write-Host ""
         Write-Host "✅ Ausgewählt: " -ForegroundColor Green -NoNewline
-        $displayValue = if ($TagValue -ne "") { $TagValue } else { "(kein Wert)" }
         Write-Host "$TagName = $displayValue" -ForegroundColor Yellow
     } else {
         Write-Host "⚠️  Ungültige Eingabe. Bitte eine Zahl zwischen 1 und $($pairList.Count) eingeben." -ForegroundColor Red
@@ -180,19 +183,32 @@ $totalRemoved = 0
 $totalFailed  = 0
 $totalSkipped = 0
 
-Write-Host "📦 Lade alle Ressourcen der Subscription..." -ForegroundColor Cyan
-$resources = az resource list --subscription $SubscriptionId | ConvertFrom-Json
-Write-Host "   → $($resources.Count) Ressourcen gefunden." -ForegroundColor Gray
+Write-Host "📦 Lade betroffene Ressourcen via Resource Graph..." -ForegroundColor Cyan
+
+# Nur Ressourcen laden die den Tag auch wirklich haben
+$filterQuery = @"
+Resources
+| where tags['$TagName'] == '$TagValue'
+| project id, name, type
+"@
+
+$filteredResources = az graph query `
+    -q $filterQuery `
+    --subscriptions $SubscriptionId `
+    --first 1000 `
+    -o json 2>$null | ConvertFrom-Json
+
+Write-Host "   → $($filteredResources.count) betroffene Ressourcen gefunden." -ForegroundColor Gray
 Write-Host ""
 Write-Host "🚀 Starte Verarbeitung..." -ForegroundColor Cyan
 Write-Host ""
 
 $counter = 0
-foreach ($resource in $resources) {
+foreach ($resource in $filteredResources.data) {
     $counter++
     Write-Progress -Activity "Tags werden entfernt..." `
-                   -Status "$counter von $($resources.Count)" `
-                   -PercentComplete (($counter / $resources.Count) * 100)
+                   -Status "$counter von $($filteredResources.count)" `
+                   -PercentComplete (($counter / [Math]::Max($filteredResources.count, 1)) * 100)
 
     $status = Remove-TagFromResource `
         -ResourceId   $resource.id `
