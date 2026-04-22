@@ -41,7 +41,9 @@ if ($DryRun) {
     Write-Host ""
 }
 
-# Resource Graph Extension prüfen (nur lokal, kein Netzwerk-Call)
+# ----------------------------------------------------------
+# Resource Graph Extension prüfen
+# ----------------------------------------------------------
 $rgExt = az extension list 2>$null | ConvertFrom-Json | Where-Object { $_.name -eq "resource-graph" }
 if (-not $rgExt) {
     Write-Host "📦 Installiere resource-graph Extension..." -ForegroundColor Yellow
@@ -49,62 +51,61 @@ if (-not $rgExt) {
 }
 
 # ----------------------------------------------------------
-# Hilfsfunktion: Resource Graph Query mit Paging
-# ----------------------------------------------------------
-function Invoke-GraphQuery {
-    param([string]$Query, [string]$SubId)
-    $allData   = @()
-    $skipToken = $null
-    do {
-        if ($skipToken) {
-            $raw = az graph query -q $Query --subscriptions $SubId --first 1000 --skip-token $skipToken -o json 2>$null | ConvertFrom-Json
-        } else {
-            $raw = az graph query -q $Query --subscriptions $SubId --first 1000 -o json 2>$null | ConvertFrom-Json
-        }
-        $allData  += $raw.data
-        $skipToken = $raw.skipToken
-    } while ($skipToken)
-    return $allData
-}
-
-# ----------------------------------------------------------
 # Alle Tag Key-Value-Pairs via Resource Graph laden
+# Die Query gibt pro Ressource die Tags als Objekt zurück.
+# PowerShell expandiert die Properties selbst – kein mvexpand.
 # ----------------------------------------------------------
 Write-Host "🏷️  Lade alle Tag Key-Value-Pairs via Resource Graph..." -ForegroundColor Cyan
 
-$tagQuery = @"
-Resources
-| where isnotempty(tags)
-| mvexpand bagexpansion=array tags
-| extend tagKey   = tostring(tags[0])
-| extend tagValue = tostring(tags[1])
-| where isnotempty(tagKey)
-| summarize tagCount=count() by tagKey, tagValue
-| order by tagKey asc, tagValue asc
-"@
+$tagQuery = 'Resources | where isnotempty(tags) | project tags'
 
-$tagData = Invoke-GraphQuery -Query $tagQuery -SubId $SubscriptionId
+$allRows  = @()
+$skipToken = $null
+do {
+    if ($skipToken) {
+        $raw = az graph query -q $tagQuery --subscriptions $SubscriptionId --first 1000 --skip-token $skipToken -o json 2>$null | ConvertFrom-Json
+    } else {
+        $raw = az graph query -q $tagQuery --subscriptions $SubscriptionId --first 1000 -o json 2>$null | ConvertFrom-Json
+    }
+    $allRows  += $raw.data
+    $skipToken = $raw.skipToken
+} while ($skipToken)
 
-if (-not $tagData -or $tagData.Count -eq 0) {
+if (-not $allRows -or $allRows.Count -eq 0) {
     Write-Host "❌ Keine Tags in der Subscription gefunden. Script wird beendet." -ForegroundColor Red
     exit 0
 }
 
+# Tags aus jedem Ressource-Objekt extrahieren und aggregieren
+$tagMap = @{}  # "TagName||TagValue" -> Anzahl
+
+foreach ($row in $allRows) {
+    $tags = $row.tags
+    if (-not $tags) { continue }
+    foreach ($prop in $tags.PSObject.Properties) {
+        $pairKey = "$($prop.Name)||$($prop.Value)"
+        if ($tagMap.ContainsKey($pairKey)) { $tagMap[$pairKey]++ }
+        else                               { $tagMap[$pairKey] = 1 }
+    }
+}
+
+if ($tagMap.Count -eq 0) {
+    Write-Host "❌ Keine Tags gefunden. Script wird beendet." -ForegroundColor Red
+    exit 0
+}
+
+# Sortierte Liste aufbauen
 $pairList = @()
-foreach ($row in $tagData) {
-    $pairList += @{
-        Name  = $row.tagKey
-        Value = [string]$row.tagValue
-        Count = $row.tagCount
+foreach ($entry in ($tagMap.GetEnumerator() | Sort-Object Name)) {
+    $parts = $entry.Key -split "\|\|", 2
+    $pairList += [PSCustomObject]@{
+        Name  = $parts[0]
+        Value = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+        Count = $entry.Value
     }
 }
 
 Write-Host "   → $($pairList.Count) Tag Key-Value-Pairs gefunden." -ForegroundColor Gray
-
-# Ressourcenliste für späteres Entfernen vorab laden
-Write-Host "📦 Lade alle Ressourcen der Subscription..." -ForegroundColor Cyan
-$resources = az resource list --subscription $SubscriptionId | ConvertFrom-Json
-Write-Host "   → $($resources.Count) Ressourcen gefunden." -ForegroundColor Gray
 
 # ----------------------------------------------------------
 # Auswahlliste anzeigen
@@ -114,11 +115,10 @@ Write-Host "================================================================" -F
 Write-Host ("  {0,-4}  {1,-30}  {2,-25}  {3}" -f "#", "Tag Name", "Tag Value", "Anzahl") -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
 
-$index = 1
-foreach ($pair in $pairList) {
+for ($i = 0; $i -lt $pairList.Count; $i++) {
+    $pair         = $pairList[$i]
     $displayValue = if ($pair.Value -ne "") { $pair.Value } else { "(kein Wert)" }
-    Write-Host ("  [{0,2}]  {1,-30}  {2,-25}  ({3}x)" -f $index, $pair.Name, $displayValue, $pair.Count) -ForegroundColor White
-    $index++
+    Write-Host ("  [{0,2}]  {1,-30}  {2,-25}  ({3}x)" -f ($i + 1), $pair.Name, $displayValue, $pair.Count) -ForegroundColor White
 }
 
 Write-Host "================================================================" -ForegroundColor Cyan
@@ -145,7 +145,9 @@ do {
     }
 } while ($selectedIndex -lt 1)
 
+# ----------------------------------------------------------
 # Bestätigung
+# ----------------------------------------------------------
 Write-Host ""
 $confirm = Read-Host "Tag '$TagName = $displayValue' von $($selectedPair.Count) Ressource(n) entfernen? (j/n)"
 if ($confirm -notin @("j", "J", "ja", "Ja", "JA")) {
@@ -156,80 +158,65 @@ if ($confirm -notin @("j", "J", "ja", "Ja", "JA")) {
 Write-Host ""
 
 # ----------------------------------------------------------
-# Hilfsfunktion: Tag entfernen (Key + Value müssen übereinstimmen)
+# Nur betroffene Ressourcen via Resource Graph laden
 # ----------------------------------------------------------
-function Remove-TagFromResource {
-    param(
-        [string]$ResourceId,
-        [string]$ResourceName,
-        [string]$TagKey,
-        [string]$TagVal,
-        [bool]$IsDryRun
-    )
+Write-Host "📦 Lade betroffene Ressourcen via Resource Graph..." -ForegroundColor Cyan
 
-    $tagsJson    = az tag list --resource-id $ResourceId 2>$null | ConvertFrom-Json
-    $currentTags = $tagsJson.properties.tags
+$escapedName  = $TagName  -replace "'", "''"
+$escapedValue = $TagValue -replace "'", "''"
+$filterQuery  = "Resources | where tags['$escapedName'] == '$escapedValue' | project id, name, type"
 
-    if (-not $currentTags) { return "skipped" }
-
-    $tagExists = $currentTags.PSObject.Properties.Name -contains $TagKey
-    if (-not $tagExists) { return "skipped" }
-
-    $currentValue = $currentTags.$TagKey
-    if ($TagVal -ne "" -and $currentValue -ne $TagVal) { return "skipped" }
-
-    Write-Host "  🏷️  $ResourceName" -ForegroundColor Yellow
-    Write-Host "       $TagKey = $currentValue" -ForegroundColor DarkYellow
-
-    if ($IsDryRun) {
-        Write-Host "     → [DRY-RUN] Würde Tag-Pair entfernen." -ForegroundColor Magenta
-        return "dryrun"
-    }
-
-    $result = az tag remove-value `
-        --resource-id $ResourceId `
-        --name $TagKey 2>&1
-
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "     ✅ Entfernt." -ForegroundColor Green
-        return "removed"
+$affectedRows = @()
+$skipToken    = $null
+do {
+    if ($skipToken) {
+        $raw = az graph query -q $filterQuery --subscriptions $SubscriptionId --first 1000 --skip-token $skipToken -o json 2>$null | ConvertFrom-Json
     } else {
-        Write-Host "     ❌ Fehler: $result" -ForegroundColor Red
-        return "failed"
+        $raw = az graph query -q $filterQuery --subscriptions $SubscriptionId --first 1000 -o json 2>$null | ConvertFrom-Json
     }
+    $affectedRows += $raw.data
+    $skipToken     = $raw.skipToken
+} while ($skipToken)
+
+if (-not $affectedRows -or $affectedRows.Count -eq 0) {
+    Write-Host "⚠️  Keine Ressourcen mit diesem Tag gefunden." -ForegroundColor Yellow
+    exit 0
 }
 
+Write-Host "   → $($affectedRows.Count) betroffene Ressourcen gefunden." -ForegroundColor Gray
+Write-Host ""
+Write-Host "🚀 Starte Verarbeitung..." -ForegroundColor Cyan
+Write-Host ""
+
 # ----------------------------------------------------------
-# Nur betroffene Ressourcen verarbeiten
+# Tag entfernen
 # ----------------------------------------------------------
 $totalRemoved = 0
 $totalFailed  = 0
-$totalSkipped = 0
+$counter      = 0
 
-Write-Host "🚀 Starte Verarbeitung der $($selectedPair.Count) betroffenen Ressource(n)..." -ForegroundColor Cyan
-Write-Host ""
+foreach ($resource in $affectedRows) {
+    $counter++
+    Write-Progress -Activity "Tags werden entfernt..." `
+                   -Status "$counter von $($affectedRows.Count)" `
+                   -PercentComplete (($counter / $affectedRows.Count) * 100)
 
-$counter = 0
-foreach ($resource in $resources) {
-    $status = Remove-TagFromResource `
-        -ResourceId   $resource.id `
-        -ResourceName "$($resource.name) [$($resource.type)]" `
-        -TagKey       $TagName `
-        -TagVal       $TagValue `
-        -IsDryRun     $DryRun
+    Write-Host "  🏷️  $($resource.name) [$($resource.type)]" -ForegroundColor Yellow
 
-    if ($status -ne "skipped") {
-        $counter++
-        Write-Progress -Activity "Tags werden entfernt..." `
-                       -Status "$counter von $($selectedPair.Count)" `
-                       -PercentComplete ([Math]::Min(($counter / [Math]::Max($selectedPair.Count, 1)) * 100, 100))
+    if ($DryRun) {
+        Write-Host "     → [DRY-RUN] Würde Tag '$TagName = $TagValue' entfernen." -ForegroundColor Magenta
+        $totalRemoved++
+        continue
     }
 
-    switch ($status) {
-        "removed" { $totalRemoved++ }
-        "dryrun"  { $totalRemoved++ }
-        "failed"  { $totalFailed++  }
-        "skipped" { $totalSkipped++ }
+    $result = az tag remove-value --resource-id $resource.id --name $TagName 2>&1
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "     ✅ Entfernt." -ForegroundColor Green
+        $totalRemoved++
+    } else {
+        Write-Host "     ❌ Fehler: $result" -ForegroundColor Red
+        $totalFailed++
     }
 }
 
@@ -248,6 +235,5 @@ if ($DryRun) {
 } else {
     Write-Host " Entfernt        : $totalRemoved" -ForegroundColor Green
 }
-Write-Host " Übersprungen    : $totalSkipped"    -ForegroundColor DarkGray
-Write-Host " Fehler          : $totalFailed"     -ForegroundColor $(if ($totalFailed -gt 0) { "Red" } else { "Gray" })
+Write-Host " Fehler          : $totalFailed" -ForegroundColor $(if ($totalFailed -gt 0) { "Red" } else { "Gray" })
 Write-Host "============================================" -ForegroundColor Cyan
