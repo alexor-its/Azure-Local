@@ -1,19 +1,21 @@
 <#
 .SYNOPSIS
-    Erstellt Remediation Tasks fuer jede einzelne DINE-Policy innerhalb der
-    Change Tracking Arc-Initiative auf allen konfigurierten Resource Groups.
+    Erstellt Remediation Tasks fuer die Change Tracking Arc-Initiative.
+    Unterstuetzt Filterung nach Windows, Linux oder beide OS-Typen.
 
 .BESCHREIBUNG
-    Pro Resource Group werden 6 Remediation Tasks erstellt - einen pro Policy
-    innerhalb der Initiative "Enable ChangeTracking and Inventory for Arc-enabled VMs".
+    Pro Resource Group werden bis zu 6 Remediation Tasks erstellt.
+    Ueber $OsFilter kann gezielt nur Windows oder Linux remediiert werden.
 
-    Die 6 Policies:
-      1. DeployAMAWindowsHybridVMWithUAIChangeTrackingAndInventory
-      2. DeployAMALinuxHybridVMWithUAIChangeTrackingAndInventory
-      3. DeployChangeTrackingExtensionWindowsHybridVM
-      4. DeployChangeTrackingExtensionLinuxHybridVM
-      5. DCRAWindowsHybridVMChangeTrackingAndInventory
-      6. DCRALinuxHybridVMChangeTrackingAndInventory
+    Windows-Policies (3):
+      - DeployAMAWindowsHybridVMWithUAIChangeTrackingAndInventory
+      - DeployChangeTrackingExtensionWindowsHybridVM
+      - DCRAWindowsHybridVMChangeTrackingAndInventory
+
+    Linux-Policies (3):
+      - DeployAMALinuxHybridVMWithUAIChangeTrackingAndInventory
+      - DeployChangeTrackingExtensionLinuxHybridVM
+      - DCRALinuxHybridVMChangeTrackingAndInventory
 
 .VORAUSSETZUNGEN
     - Azure CLI installiert
@@ -45,6 +47,9 @@ $ResourceGroups = @(
     # Weitere Resource Groups hier hinzufuegen
 )
 
+# OS-Filter: "Windows", "Linux" oder "Both"
+$OsFilter = "Both"
+
 # Muss identisch zum Deploy-Script sein
 $AssignmentPrefix = "CT-Arc"
 
@@ -52,16 +57,30 @@ $AssignmentPrefix = "CT-Arc"
 # === ENDE KONFIGURATION =====================================
 # ============================================================
 
-# Hardcodierte Policy Reference IDs der Arc Initiative
+# Policy Reference IDs aufgeteilt nach OS
 # Quelle: az policy set-definition show --name 53448c70-089b-4f52-8f38-89196d7f2de1
-$PolicyReferenceIds = @(
-    "DeployAMAWindowsHybridVMWithUAIChangeTrackingAndInventory",
-    "DeployAMALinuxHybridVMWithUAIChangeTrackingAndInventory",
-    "DeployChangeTrackingExtensionWindowsHybridVM",
-    "DeployChangeTrackingExtensionLinuxHybridVM",
-    "DCRAWindowsHybridVMChangeTrackingAndInventory",
-    "DCRALinuxHybridVMChangeTrackingAndInventory"
+$PoliciesWindows = @(
+    @{ RefId = "DeployAMAWindowsHybridVMWithUAIChangeTrackingAndInventory"; Short = "AMAWin" },
+    @{ RefId = "DeployChangeTrackingExtensionWindowsHybridVM";              Short = "CTExtWin" },
+    @{ RefId = "DCRAWindowsHybridVMChangeTrackingAndInventory";             Short = "DCRAWin" }
 )
+
+$PoliciesLinux = @(
+    @{ RefId = "DeployAMALinuxHybridVMWithUAIChangeTrackingAndInventory";   Short = "AMALin" },
+    @{ RefId = "DeployChangeTrackingExtensionLinuxHybridVM";                Short = "CTExtLin" },
+    @{ RefId = "DCRALinuxHybridVMChangeTrackingAndInventory";               Short = "DCRALin" }
+)
+
+# Aktive Policy-Liste basierend auf OsFilter zusammenstellen
+$ActivePolicies = switch ($OsFilter) {
+    "Windows" { $PoliciesWindows }
+    "Linux"   { $PoliciesLinux }
+    "Both"    { $PoliciesWindows + $PoliciesLinux }
+    default   {
+        Write-Host "[FEHLER] OsFilter muss 'Windows', 'Linux' oder 'Both' sein." -ForegroundColor Red
+        exit 1
+    }
+}
 
 # ------------------------------------------------------------------
 # Hilfsfunktionen
@@ -100,15 +119,18 @@ if ($LASTEXITCODE -ne 0) { Write-Err "Subscription nicht gefunden oder kein Zugr
 Write-Success "Subscription aktiv: $SubscriptionId"
 
 Write-Host ""
-Write-Host "  Policy Reference IDs ($($PolicyReferenceIds.Count) Stueck):" -ForegroundColor White
-foreach ($refId in $PolicyReferenceIds) {
-    Write-Host "    - $refId" -ForegroundColor DarkGray
+Write-Host "  OS-Filter    : $OsFilter" -ForegroundColor White
+Write-Host "  Aktive Tasks : $($ActivePolicies.Count) pro Resource Group" -ForegroundColor White
+Write-Host ""
+Write-Host "  Policies die remediiert werden:" -ForegroundColor White
+foreach ($p in $ActivePolicies) {
+    Write-Host "    - $($p.RefId)" -ForegroundColor DarkGray
 }
 
 # ------------------------------------------------------------------
 # Remediation Tasks pro RG und pro Policy erstellen
 # ------------------------------------------------------------------
-Write-Header "Erstelle Remediation Tasks ($($PolicyReferenceIds.Count) Tasks pro Resource Group)"
+Write-Header "Erstelle Remediation Tasks"
 
 $timestamp    = Get-Date -Format 'yyyyMMddHHmm'
 $successCount = 0
@@ -119,7 +141,7 @@ foreach ($rg in $ResourceGroups) {
 
     Write-Step "Resource Group: $rg"
 
-    $rgClean        = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($rg -replace "[^a-zA-Z0-9-]","").Length, 20))
+    $rgClean        = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($rg -replace "[^a-zA-Z0-9-]","").Length, 18))
     $assignmentName = "$AssignmentPrefix-$rgClean"
     $scope          = "/subscriptions/$SubscriptionId/resourceGroups/$rg"
 
@@ -127,7 +149,6 @@ foreach ($rg in $ResourceGroups) {
     $assignCheck = az policy assignment show --name $assignmentName --scope $scope 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Assignment '$assignmentName' nicht gefunden - ueberspringe '$rg'."
-        Write-Host "  Vorhandene Assignments anzeigen:" -ForegroundColor DarkGray
         Write-Host "  az policy assignment list --scope $scope -o table" -ForegroundColor DarkGray
         $rgErrorCount++
         continue
@@ -143,12 +164,14 @@ foreach ($rg in $ResourceGroups) {
     $rgSuccess = 0
     $rgError   = 0
 
-    foreach ($refId in $PolicyReferenceIds) {
+    foreach ($policy in $ActivePolicies) {
 
-        # Remediation-Name aufbauen und auf 64 Zeichen kuerzen
-        $refIdShort      = $refId.Substring(0, [Math]::Min($refId.Length, 20))
-        $remNameRaw      = "rem-$rgClean-$refIdShort-$timestamp"
-        $remediationName = $remNameRaw.Substring(0, [Math]::Min($remNameRaw.Length, 64))
+        $refId = $policy.RefId
+        $short = $policy.Short
+
+        # Eindeutiger, kurzer Remediation-Name: rem-<rgShort>-<policyShort>-<timestamp>
+        # Alle Teile sind kontrolliert kurz -> keine Kollisionen mehr
+        $remediationName = "rem-$rgClean-$short-$timestamp"
 
         Write-Host "  Task: $refId" -ForegroundColor White
 
@@ -160,10 +183,15 @@ foreach ($rg in $ResourceGroups) {
             --resource-group $rg 2>&1
 
         if ($LASTEXITCODE -ne 0) {
-            Write-Err "Task fehlgeschlagen:"
-            Write-Host "  $remResult" -ForegroundColor Red
-            $rgError++
-            $errorCount++
+            # Aktiver Task mit gleichem Namen - sicherheitshalber pruefen
+            if ($remResult -match "active|not be changed|replaced while") {
+                Write-Warn "Task '$remediationName' laeuft bereits - ueberspringe."
+            } else {
+                Write-Err "Task fehlgeschlagen fuer '$refId':"
+                Write-Host "  $remResult" -ForegroundColor Red
+                $rgError++
+                $errorCount++
+            }
         } else {
             $remObj = $remResult | ConvertFrom-Json -ErrorAction SilentlyContinue
             Write-Success "Erstellt: $remediationName | Status: $($remObj.provisioningState)"
@@ -182,6 +210,7 @@ foreach ($rg in $ResourceGroups) {
 # ------------------------------------------------------------------
 Write-Header "Zusammenfassung"
 Write-Host ""
+Write-Host "  OS-Filter                   : $OsFilter"                                -ForegroundColor White
 Write-Host "  Resource Groups verarbeitet : $($ResourceGroups.Count - $rgErrorCount)" -ForegroundColor White
 Write-Host "  RGs nicht gefunden          : $rgErrorCount"   -ForegroundColor $(if ($rgErrorCount -gt 0) { "Red" } else { "Green" })
 Write-Host "  Tasks erfolgreich erstellt  : $successCount"   -ForegroundColor Green
@@ -198,7 +227,8 @@ if ($successCount -gt 0) {
     Write-Host ""
     Write-Host "  3. Extensions auf Arc-Servern pruefen:" -ForegroundColor White
     Write-Host "     Azure Portal -> Arc-Server -> Extensions" -ForegroundColor DarkGray
-    Write-Host "     Erwartet: AzureMonitorWindowsAgent + ChangeTracking-Windows/Linux" -ForegroundColor DarkGray
+    Write-Host "     Erwartet Windows : AzureMonitorWindowsAgent + ChangeTracking-Windows" -ForegroundColor DarkGray
+    Write-Host "     Erwartet Linux   : AzureMonitorLinuxAgent  + ChangeTracking-Linux" -ForegroundColor DarkGray
     Write-Host ""
 }
 
