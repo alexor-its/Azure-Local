@@ -50,9 +50,9 @@
 $SubscriptionId = "<DEINE-SUBSCRIPTION-ID>"
 
 # Data Collection Rule Resource ID
-# Ermitteln: az monitor data-collection rule show --name <DCR-Name> --resource-group <RG> --query id -o tsv
-# Format: /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Insights/dataCollectionRules/<name>
-$DcrResourceId = "<DEINE-DCR-RESOURCE-ID>"
+# Name und Resource Group der DCR angeben - die Resource ID wird automatisch ermittelt
+$DcrName              = "<DCR-NAME>"
+$DcrResourceGroupName = "<DCR-RESOURCE-GROUP>"
 
 # Resource Groups mit Arc-Servern, auf die die Policy angewendet werden soll
 $ResourceGroups = @(
@@ -75,6 +75,11 @@ $ManagedIdentityLocation = "germanywestcentral"
 # $true  = bestehende Arc-Server werden sofort remediiert
 # $false = nur neue/geänderte Server werden durch die Policy erfasst
 $CreateRemediationTask = $true
+
+# Bestehende Assignments mit korrekter DCR-ID aktualisieren?
+# $true  = vorhandene Assignments werden mit az policy assignment update aktualisiert
+# $false = bestehende Assignments werden uebersprungen (Standard-Verhalten)
+$UpdateExistingAssignments = $true
 
 # ============================================================
 # === ENDE KONFIGURATION =====================================
@@ -131,8 +136,12 @@ if ($SubscriptionId -like "*<*") {
     Write-Err "Bitte 'SubscriptionId' in der Konfiguration eintragen!"
     exit 1
 }
-if ($DcrResourceId -like "*<*") {
-    Write-Err "Bitte 'DcrResourceId' in der Konfiguration eintragen!"
+if ($DcrName -like "*<*") {
+    Write-Err "Bitte 'DcrName' in der Konfiguration eintragen!"
+    exit 1
+}
+if ($DcrResourceGroupName -like "*<*") {
+    Write-Err "Bitte 'DcrResourceGroupName' in der Konfiguration eintragen!"
     exit 1
 }
 if ($ResourceGroups.Count -eq 0) {
@@ -169,6 +178,25 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Success "Subscription aktiv: $SubscriptionId"
 
+# DCR Resource ID automatisch ermitteln
+Write-Step "Ermittle DCR Resource ID fuer: $DcrName (RG: $DcrResourceGroupName)..."
+$DcrResourceId = az monitor data-collection rule show `
+    --name $DcrName `
+    --resource-group $DcrResourceGroupName `
+    --subscription $SubscriptionId `
+    --query id -o tsv 2>&1
+
+if ($LASTEXITCODE -ne 0 -or -not $DcrResourceId -or $DcrResourceId -like "*ERROR*") {
+    Write-Err "DCR '$DcrName' in RG '$DcrResourceGroupName' nicht gefunden:"
+    Write-Host "  $DcrResourceId" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Verfuegbare DCRs anzeigen:" -ForegroundColor DarkGray
+    Write-Host "  az monitor data-collection rule list --subscription $SubscriptionId --query `"[].{Name:name, RG:resourceGroup}`" -o table" -ForegroundColor DarkGray
+    exit 1
+}
+$DcrResourceId = $DcrResourceId.Trim()
+Write-Success "DCR gefunden: $DcrResourceId"
+
 # Arc Initiative Definition laden und prüfen
 Write-Step "Lade Arc Policy Initiative Definition (ID: $ArcInitiativeId)..."
 $arcInitiativeDef = az policy set-definition show --name $ArcInitiativeId 2>&1 | ConvertFrom-Json
@@ -202,6 +230,7 @@ Write-Host ""
 $successCount   = 0
 $errorCount     = 0
 $skippedCount   = 0
+$updatedCount   = 0
 $assignmentMap  = @{}   # rg -> assignmentName
 
 foreach ($rg in $ResourceGroups) {
@@ -235,27 +264,58 @@ foreach ($rg in $ResourceGroups) {
 
     # Existiert das Assignment bereits?
     $existingAssign = az policy assignment show --name $assignmentName --scope $scope 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        $existingObj = $existingAssign | ConvertFrom-Json
-        Write-Info "Assignment '$assignmentName' existiert bereits – überspringe."
+    $assignmentExists = ($LASTEXITCODE -eq 0)
+
+    if ($assignmentExists -and -not $UpdateExistingAssignments) {
+        Write-Info "Assignment '$assignmentName' existiert bereits - ueberspringe."
         $assignmentMap[$rg] = $assignmentName
         $skippedCount++
         continue
     }
 
+    # JSON-Params fuer Erstellung und Update vorbereiten
+    # WICHTIG: Direkt als String schreiben - ConvertTo-Json kapitalisiert "value" zu "Value"
+    $locationJsonArray = ($ApplicableLocations -split "," | ForEach-Object { "`"$($_.Trim())`"" }) -join ","
+    $paramsJson = @"
+{
+  "dcrResourceId": {
+    "value": "$DcrResourceId"
+  },
+  "listOfApplicableLocations": {
+    "value": [$locationJsonArray]
+  }
+}
+"@
+    $paramsTempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "ct-arc-params-$($rg -replace '[^a-zA-Z0-9]','').json")
+    $paramsJson | Set-Content -Path $paramsTempFile -Encoding UTF8
+
+    if ($assignmentExists -and $UpdateExistingAssignments) {
+
+        Write-Host "  Aktualisiere Assignment: $assignmentName (DCR-ID wird korrigiert)" -ForegroundColor White
+
+        $updateResult = az policy assignment update `
+            --name $assignmentName `
+            --scope $scope `
+            --params "@$paramsTempFile" 2>&1
+
+        Remove-Item -Path $paramsTempFile -ErrorAction SilentlyContinue
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "Update fehlgeschlagen fuer '$rg':"
+            Write-Host "  $updateResult" -ForegroundColor Red
+            $errorCount++
+            continue
+        }
+
+        Write-Success "Assignment aktualisiert: $assignmentName"
+        $assignmentMap[$rg] = $assignmentName
+        $updatedCount++
+        continue
+    }
+
     Write-Host "  Erstelle Assignment: $assignmentName" -ForegroundColor White
 
-    # Policy Assignment erstellen
-    # Die Arc-Initiative benoetigt: dcrResourceId + listOfApplicableLocations
-    # System-Assigned Managed Identity ist fuer DINE-Policies zwingend erforderlich
-    # Params als temporaere JSON-Datei schreiben (verhindert Shell-Parsing-Fehler bei --params)
-    $paramsObject = [ordered]@{
-        dcrResourceId             = @{ value = $DcrResourceId }
-        listOfApplicableLocations = @{ value = @($ApplicableLocations -split "," | ForEach-Object { $_.Trim() }) }
-    }
-    $paramsTempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "ct-arc-params-$($rg -replace '[^a-zA-Z0-9]','').json")
-    $paramsObject | ConvertTo-Json -Depth 5 | Set-Content -Path $paramsTempFile -Encoding UTF8
-
+    # Policy Assignment erstellen mit System-Assigned Managed Identity (benoetigt fuer DINE)
     $assignResult = az policy assignment create `
         --name $assignmentName `
         --display-name $displayName `
@@ -368,7 +428,8 @@ Write-Host "  Initiative ID: $ArcInitiativeId" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Resource Groups gesamt    : $($ResourceGroups.Count)" -ForegroundColor White
 Write-Host "  Neu erstellt (Assignments): $successCount"            -ForegroundColor Green
-Write-Host "  Bereits vorhanden         : $skippedCount"            -ForegroundColor DarkYellow
+Write-Host "  Aktualisiert (DCR-Fix)    : $updatedCount"            -ForegroundColor Cyan
+Write-Host "  Uebersprungen             : $skippedCount"            -ForegroundColor DarkYellow
 Write-Host "  Fehler                    : $errorCount"              -ForegroundColor $(if ($errorCount -gt 0) { "Red" } else { "Green" })
 Write-Host ""
 
