@@ -1,7 +1,7 @@
 # ============================================================
 # Remove-AzureTag.ps1
-# Entfernt einen ausgewählten Tag von allen Azure-Ressourcen
-# und Ressourcengruppen im aktuellen Subscription
+# Entfernt ein ausgewähltes Tag Key-Value-Pair von allen
+# Azure-Ressourcen in der aktuellen Subscription
 # ============================================================
 
 # ----------------------------------------------------------
@@ -29,7 +29,6 @@ if (-not $account) {
     az login | Out-Null
 }
 
-# Subscription setzen
 if ($SubscriptionId -ne "") {
     az account set --subscription $SubscriptionId | Out-Null
     Write-Host "✅ Subscription gesetzt: $SubscriptionId" -ForegroundColor Cyan
@@ -60,12 +59,13 @@ if ($IncludeResourceGroups) {
 }
 
 # ----------------------------------------------------------
-# Alle vorhandenen Tags einsammeln
+# Alle Tag Key-Value-Pairs einsammeln
 # ----------------------------------------------------------
 Write-Host ""
-Write-Host "🏷️  Sammle alle vorhandenen Tags..." -ForegroundColor Cyan
+Write-Host "🏷️  Sammle alle vorhandenen Tag Key-Value-Pairs..." -ForegroundColor Cyan
 
-$tagMap   = @{}
+# tagPairs: Key = "TagName||TagValue", Value = Anzahl Ressourcen
+$tagPairs = @{}
 $allItems = @($resources) + @($resourceGroups)
 $total    = $allItems.Count
 $counter  = 0
@@ -81,10 +81,12 @@ foreach ($item in $allItems) {
 
     if ($tags) {
         foreach ($key in $tags.PSObject.Properties.Name) {
-            if ($tagMap.ContainsKey($key)) {
-                $tagMap[$key]++
+            $value    = $tags.$key
+            $pairKey  = "$key||$value"
+            if ($tagPairs.ContainsKey($pairKey)) {
+                $tagPairs[$pairKey]++
             } else {
-                $tagMap[$key] = 1
+                $tagPairs[$pairKey] = 1
             }
         }
     }
@@ -92,52 +94,61 @@ foreach ($item in $allItems) {
 
 Write-Progress -Completed -Activity "Tags werden gesammelt..."
 
-if ($tagMap.Count -eq 0) {
+if ($tagPairs.Count -eq 0) {
     Write-Host ""
     Write-Host "❌ Keine Tags in der Subscription gefunden. Script wird beendet." -ForegroundColor Red
     exit 0
 }
 
 # ----------------------------------------------------------
-# Interaktive Tag-Auswahl
+# Interaktive Tag-Auswahl (Key-Value-Pairs)
 # ----------------------------------------------------------
-$sortedTags = $tagMap.GetEnumerator() | Sort-Object Name
+$sortedPairs = $tagPairs.GetEnumerator() | Sort-Object { $_.Key }
 
 Write-Host ""
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host " Verfügbare Tags in der Subscription" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "  #    Tag Name                        Tag Value               " -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
 
-$index   = 1
-$tagList = @()
-foreach ($entry in $sortedTags) {
-    Write-Host ("  [{0,2}]  {1,-40} ({2} Ressource(n))" -f $index, $entry.Key, $entry.Value) -ForegroundColor White
-    $tagList += $entry.Key
+$index      = 1
+$pairList   = @()
+foreach ($entry in $sortedPairs) {
+    $parts    = $entry.Key -split "\|\|"
+    $tagName  = $parts[0]
+    $tagValue = if ($parts.Count -gt 1 -and $parts[1] -ne "") { $parts[1] } else { "(kein Wert)" }
+    $count    = $entry.Value
+
+    Write-Host ("  [{0,2}]  {1,-30}  {2,-25} ({3}x)" -f $index, $tagName, $tagValue, $count) -ForegroundColor White
+    $pairList += @{ Name = $tagName; Value = $parts[1] }
     $index++
 }
 
-Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host ""
 
 # Eingabe mit Validierung
 do {
-    $userInput     = Read-Host "Nummer des Tags eingeben, der entfernt werden soll (1-$($tagList.Count))"
+    $userInput     = Read-Host "Nummer des Tag-Pairs eingeben, das entfernt werden soll (1-$($pairList.Count))"
     $selectedIndex = $userInput -as [int]
 
-    if ($selectedIndex -ge 1 -and $selectedIndex -le $tagList.Count) {
-        $TagName = $tagList[$selectedIndex - 1]
+    if ($selectedIndex -ge 1 -and $selectedIndex -le $pairList.Count) {
+        $selectedPair = $pairList[$selectedIndex - 1]
+        $TagName      = $selectedPair.Name
+        $TagValue     = $selectedPair.Value
         Write-Host ""
-        Write-Host "✅ Ausgewählter Tag: " -ForegroundColor Green -NoNewline
-        Write-Host $TagName -ForegroundColor Yellow
+        Write-Host "✅ Ausgewählt: " -ForegroundColor Green -NoNewline
+        Write-Host "$TagName = $TagValue" -ForegroundColor Yellow
     } else {
-        Write-Host "⚠️  Ungültige Eingabe. Bitte eine Zahl zwischen 1 und $($tagList.Count) eingeben." -ForegroundColor Red
+        Write-Host "⚠️  Ungültige Eingabe. Bitte eine Zahl zwischen 1 und $($pairList.Count) eingeben." -ForegroundColor Red
         $selectedIndex = 0
     }
 } while ($selectedIndex -lt 1)
 
 # Bestätigung
+$pairKey  = "$TagName||$TagValue"
+$affectedCount = $tagPairs[$pairKey]
 Write-Host ""
-$confirm = Read-Host "Tag '$TagName' von $($tagMap[$TagName]) Ressource(n) entfernen? (j/n)"
+$confirm = Read-Host "Tag '$TagName = $TagValue' von $affectedCount Ressource(n) entfernen? (j/n)"
 if ($confirm -notin @("j", "J", "ja", "Ja", "JA")) {
     Write-Host "❌ Abgebrochen." -ForegroundColor Red
     exit 0
@@ -146,13 +157,14 @@ if ($confirm -notin @("j", "J", "ja", "Ja", "JA")) {
 Write-Host ""
 
 # ----------------------------------------------------------
-# Hilfsfunktion: Tag entfernen
+# Hilfsfunktion: Tag entfernen (nur wenn Key+Value übereinstimmt)
 # ----------------------------------------------------------
 function Remove-TagFromResource {
     param(
         [string]$ResourceId,
         [string]$ResourceName,
         [string]$TagKey,
+        [string]$TagVal,
         [bool]$IsDryRun
     )
 
@@ -164,10 +176,15 @@ function Remove-TagFromResource {
     $tagExists = $currentTags.PSObject.Properties.Name -contains $TagKey
     if (-not $tagExists) { return "skipped" }
 
+    # Nur entfernen wenn Value übereinstimmt
+    $currentValue = $currentTags.$TagKey
+    if ($currentValue -ne $TagVal) { return "skipped" }
+
     Write-Host "  🏷️  $ResourceName" -ForegroundColor Yellow
+    Write-Host "       $TagKey = $currentValue" -ForegroundColor DarkYellow
 
     if ($IsDryRun) {
-        Write-Host "     → [DRY-RUN] Würde Tag '$TagKey' entfernen." -ForegroundColor Magenta
+        Write-Host "     → [DRY-RUN] Würde Tag-Pair entfernen." -ForegroundColor Magenta
         return "dryrun"
     }
 
@@ -185,7 +202,7 @@ function Remove-TagFromResource {
 }
 
 # ----------------------------------------------------------
-# Tag von allen Ressourcen entfernen
+# Verarbeitung
 # ----------------------------------------------------------
 $totalRemoved = 0
 $totalFailed  = 0
@@ -199,6 +216,7 @@ foreach ($resource in $resources) {
         -ResourceId   $resource.id `
         -ResourceName "$($resource.name) [$($resource.type)]" `
         -TagKey       $TagName `
+        -TagVal       $TagValue `
         -IsDryRun     $DryRun
 
     switch ($status) {
@@ -215,6 +233,7 @@ if ($IncludeResourceGroups) {
             -ResourceId   $rg.id `
             -ResourceName "RG: $($rg.name)" `
             -TagKey       $TagName `
+            -TagVal       $TagValue `
             -IsDryRun     $DryRun
 
         switch ($status) {
@@ -233,7 +252,7 @@ Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host " Zusammenfassung" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host " Tag-Name        : $TagName"
+Write-Host " Tag             : $TagName = $TagValue"
 if ($DryRun) {
     Write-Host " Würden entfernt : $totalRemoved" -ForegroundColor Magenta
 } else {
