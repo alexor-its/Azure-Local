@@ -51,6 +51,8 @@ $SubscriptionId = "<DEINE-SUBSCRIPTION-ID>"
 
 # Data Collection Rule Resource ID
 # Name und Resource Group der DCR angeben - die Resource ID wird automatisch ermittelt
+# WICHTIG: Die Managed Identity benoetigt "Monitoring Contributor" auf dieser RG
+#          um DCR-Associations auf den Arc-Servern erstellen zu koennen!
 $DcrName              = "<DCR-NAME>"
 $DcrResourceGroupName = "<DCR-RESOURCE-GROUP>"
 
@@ -401,7 +403,7 @@ foreach ($rg in $ResourceGroups) {
             Write-Success "Contributor-Rolle zugewiesen"
         }
 
-        # Connected Machine Contributor (für Arc-spezifische Operationen)
+        # Azure Connected Machine Resource Administrator (fuer Arc-Extension-Deployment)
         Write-Host "  Weise 'Azure Connected Machine Resource Administrator'-Rolle zu..." -ForegroundColor White
         $arcRoleResult = az role assignment create `
             --role "Azure Connected Machine Resource Administrator" `
@@ -410,10 +412,27 @@ foreach ($rg in $ResourceGroups) {
             --scope $scope 2>&1
 
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Arc-Rollenzuweisung fehlgeschlagen – bei Bedarf manuell vergeben:"
+            Write-Warn "Arc-Rollenzuweisung fehlgeschlagen - bitte manuell vergeben:"
             Write-Host "  az role assignment create --role 'Azure Connected Machine Resource Administrator' --assignee-object-id $principalId --scope $scope" -ForegroundColor DarkGray
         } else {
             Write-Success "Azure Connected Machine Resource Administrator-Rolle zugewiesen"
+        }
+
+        # Monitoring Contributor auf DCR-RG (benoetigt um DCR-Association zu erstellen)
+        # Die DCR liegt in einer anderen RG als die Arc-Server - daher separate Rollenzuweisung!
+        $dcrRgScope = "/subscriptions/$SubscriptionId/resourceGroups/$DcrResourceGroupName"
+        Write-Host "  Weise 'Monitoring Contributor'-Rolle auf DCR-RG zu ($DcrResourceGroupName)..." -ForegroundColor White
+        $monitorRoleResult = az role assignment create `
+            --role "Monitoring Contributor" `
+            --assignee-object-id $principalId `
+            --assignee-principal-type ServicePrincipal `
+            --scope $dcrRgScope 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Monitoring Contributor-Rollenzuweisung fehlgeschlagen - bitte manuell vergeben:"
+            Write-Host "  az role assignment create --role 'Monitoring Contributor' --assignee-object-id $principalId --scope $dcrRgScope" -ForegroundColor DarkGray
+        } else {
+            Write-Success "Monitoring Contributor-Rolle auf DCR-RG zugewiesen ($DcrResourceGroupName)"
         }
 
     } else {
