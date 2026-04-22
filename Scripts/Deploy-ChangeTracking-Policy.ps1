@@ -81,15 +81,51 @@ $CreateRemediationTask = $true
 # $false = bestehende Assignments werden uebersprungen (Standard-Verhalten)
 $UpdateExistingAssignments = $true
 
+# OS-Filter: Nur passende Policies deployen
+# "Windows" = nur Windows-Policies
+# "Linux"   = nur Linux-Policies
+# "Both"    = alle 6 Policies (Standard)
+$OsFilter = "Both"
+
 # ============================================================
 # === ENDE KONFIGURATION =====================================
 # ============================================================
 
-# Builtin Initiative ID: "Enable ChangeTracking and Inventory for Arc-enabled virtual machines"
-$ArcInitiativeId = "53448c70-089b-4f52-8f38-89196d7f2de1"
+# Builtin Initiative IDs je OS
+# Quelle: az policy set-definition show --name 53448c70-089b-4f52-8f38-89196d7f2de1
+$InitiativeIdBoth    = "53448c70-089b-4f52-8f38-89196d7f2de1"  # Alle 6 Policies (Windows + Linux)
+$InitiativeIdWindows = "53448c70-089b-4f52-8f38-89196d7f2de1"  # Gleiche Initiative - OS-Filter per Exclusion
+$InitiativeIdLinux   = "53448c70-089b-4f52-8f38-89196d7f2de1"  # Gleiche Initiative - OS-Filter per Exclusion
 
-# Präfix für Assignment- und Remediation-Namen
-$AssignmentPrefix = "CT-Arc"
+# Policy Reference IDs aufgeteilt nach OS (fuer Remediation-Steuerung und Anzeige)
+$PoliciesWindows = @(
+    "DeployAMAWindowsHybridVMWithUAIChangeTrackingAndInventory",
+    "DeployChangeTrackingExtensionWindowsHybridVM",
+    "DCRAWindowsHybridVMChangeTrackingAndInventory"
+)
+$PoliciesLinux = @(
+    "DeployAMALinuxHybridVMWithUAIChangeTrackingAndInventory",
+    "DeployChangeTrackingExtensionLinuxHybridVM",
+    "DCRALinuxHybridVMChangeTrackingAndInventory"
+)
+
+# Aktive Policies basierend auf OsFilter
+$ActivePolicies = switch ($OsFilter) {
+    "Windows" { $PoliciesWindows }
+    "Linux"   { $PoliciesLinux }
+    "Both"    { $PoliciesWindows + $PoliciesLinux }
+    default   { Write-Host "[FEHLER] OsFilter muss 'Windows', 'Linux' oder 'Both' sein." -ForegroundColor Red; exit 1 }
+}
+
+# Arc Initiative ID (eine Initiative fuer alle OS-Typen)
+$ArcInitiativeId = $InitiativeIdBoth
+
+# Prafix fuer Assignment- und Remediation-Namen (OS wird angehaengt wenn nicht Both)
+$AssignmentPrefix = switch ($OsFilter) {
+    "Windows" { "CT-Arc-Win" }
+    "Linux"   { "CT-Arc-Lin" }
+    "Both"    { "CT-Arc" }
+}
 
 # ------------------------------------------------------------------
 # Hilfsfunktionen
@@ -394,25 +430,48 @@ if ($CreateRemediationTask -and $assignmentMap.Count -gt 0) {
 
     Write-Header "Remediation Tasks erstellen (für bestehende Arc-Server)"
 
+    # Policy-Kurzbezeichnungen fuer eindeutige Task-Namen (identisch zum Remediation-Script)
+    $PolicyShortNames = @{
+        "DeployAMAWindowsHybridVMWithUAIChangeTrackingAndInventory" = "AMAWin"
+        "DeployAMALinuxHybridVMWithUAIChangeTrackingAndInventory"   = "AMALin"
+        "DeployChangeTrackingExtensionWindowsHybridVM"              = "CTExtWin"
+        "DeployChangeTrackingExtensionLinuxHybridVM"                = "CTExtLin"
+        "DCRAWindowsHybridVMChangeTrackingAndInventory"             = "DCRAWin"
+        "DCRALinuxHybridVMChangeTrackingAndInventory"               = "DCRALin"
+    }
+
     foreach ($rg in $assignmentMap.Keys) {
 
-        $assignmentName  = $assignmentMap[$rg]
-        $timestamp       = Get-Date -Format 'yyyyMMddHHmm'
-        $rgClean         = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($rg -replace "[^a-zA-Z0-9-]","").Length, 20))
-        $remediationName = "rem-arc-$rgClean-$timestamp"
+        $assignmentName = $assignmentMap[$rg]
+        $timestamp      = Get-Date -Format 'yyyyMMddHHmm'
+        $rgClean        = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($rg -replace "[^a-zA-Z0-9-]","").Length, 18))
 
-        Write-Step "Erstelle Remediation Task für: $rg"
+        Write-Step "Erstelle Remediation Tasks fuer: $rg ($($ActivePolicies.Count) Tasks)"
 
-        $remResult = az policy remediation create `
-            --name $remediationName `
-            --policy-assignment $assignmentName `
-            --resource-group $rg 2>&1
+        foreach ($refId in $ActivePolicies) {
+            $short           = $PolicyShortNames[$refId]
+            $remediationName = "rem-$rgClean-$short-$timestamp"
 
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Remediation Task fehlgeschlagen (kann auch bedeuten, dass bereits compliant):"
-            Write-Host "  $remResult" -ForegroundColor DarkGray
-        } else {
-            Write-Success "Remediation Task gestartet: $remediationName"
+            Write-Host "  Task: $refId" -ForegroundColor White
+
+            $remResult = az policy remediation create `
+                --name $remediationName `
+                --policy-assignment $assignmentName `
+                --definition-reference-id $refId `
+                --resource-discovery-mode ReEvaluateCompliance `
+                --resource-group $rg 2>&1
+
+            if ($LASTEXITCODE -ne 0) {
+                if ($remResult -match "active|not be changed|replaced while") {
+                    Write-Warn "Task laeuft bereits - ueberspringe."
+                } else {
+                    Write-Warn "Task fehlgeschlagen:"
+                    Write-Host "  $remResult" -ForegroundColor DarkGray
+                }
+            } else {
+                $remObj = $remResult | ConvertFrom-Json -ErrorAction SilentlyContinue
+                Write-Success "Erstellt: $remediationName | Status: $($remObj.provisioningState)"
+            }
         }
     }
 }
@@ -423,6 +482,7 @@ if ($CreateRemediationTask -and $assignmentMap.Count -gt 0) {
 Write-Header "Zusammenfassung"
 Write-Host ""
 Write-Host "  Ziel         : Azure Arc-enabled Server (KEINE Azure VMs)" -ForegroundColor White
+Write-Host "  OS-Filter    : $OsFilter ($($ActivePolicies.Count) Policies aktiv)" -ForegroundColor White
 Write-Host "  Initiative   : $($arcInitiativeDef.displayName)" -ForegroundColor White
 Write-Host "  Initiative ID: $ArcInitiativeId" -ForegroundColor DarkGray
 Write-Host ""
