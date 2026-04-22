@@ -41,8 +41,12 @@ if ($DryRun) {
     Write-Host ""
 }
 
-# Resource Graph Extension sicherstellen
-az extension add --name resource-graph --only-show-errors 2>$null
+# Resource Graph Extension prüfen (nur lokal, kein Netzwerk-Call)
+$rgExt = az extension list 2>$null | ConvertFrom-Json | Where-Object { $_.name -eq "resource-graph" }
+if (-not $rgExt) {
+    Write-Host "📦 Installiere resource-graph Extension..." -ForegroundColor Yellow
+    az extension add --name resource-graph --only-show-errors 2>$null
+}
 
 # ----------------------------------------------------------
 # Hilfsfunktion: Resource Graph Query mit Paging
@@ -80,7 +84,7 @@ Resources
 | extend tagKey   = tostring(tags[0])
 | extend tagValue = tostring(tags[1])
 | where isnotempty(tagKey)
-| summarize count() by tagKey, tagValue
+| summarize Anzahl=count() by tagKey, tagValue
 | order by tagKey asc, tagValue asc
 "@
 
@@ -96,7 +100,7 @@ foreach ($row in $tagData) {
     $pairList += @{
         Name  = $row.tagKey
         Value = $row.tagValue
-        Count = $row.count_
+        Count = $row.Anzahl
     }
 }
 
