@@ -209,7 +209,7 @@ foreach ($resource in $affectedRows) {
         continue
     }
 
-    $result = az tag remove-value --resource-id $resource.id --name $TagName 2>&1
+    $result = az tag update --resource-id $resource.id --operation Delete --tags "$TagName=$TagValue" 2>&1
 
     if ($LASTEXITCODE -eq 0) {
         Write-Host "     ✅ Entfernt." -ForegroundColor Green
