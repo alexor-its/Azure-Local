@@ -1,11 +1,12 @@
 # ============================================================
 # Variablen anpassen
 # ============================================================
-$SoftwareName   = "MySQL Server"
-$WorkspaceName  = "<LOG-ANALYTICS-WORKSPACE-NAME>"
+
+$SoftwareName   = "MySQL Server"          # oder "Sophos Endpoint Agent"
+$WorkspaceName  = "<WORKSPACE-NAME>"      # Name des Log Analytics Workspace
 $SubscriptionId = "<SUBSCRIPTION-ID>"
 $TagName        = "Software"
-$TagValue       = $SoftwareName      # Alternativ festen Wert setzen z.B. "MySQL"
+$TagValue       = $SoftwareName           # oder fester Wert z.B. "MySQL"
 
 $RequiredExtensions = @("log-analytics", "connectedmachine")
 
