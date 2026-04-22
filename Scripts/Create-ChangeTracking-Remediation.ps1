@@ -4,11 +4,16 @@
     Change Tracking Arc-Initiative auf allen konfigurierten Resource Groups.
 
 .BESCHREIBUNG
-    Bei einer Initiative (Policy Set) muss pro enthaltener Policy ein eigener
-    Remediation Task erstellt werden. Das Script:
-      1. Liest alle policyDefinitionReferenceIds dynamisch aus der Initiative
-      2. Erstellt pro RG und pro Policy einen Remediation Task
-      3. Gibt eine vollstaendige Zusammenfassung aus
+    Pro Resource Group werden 6 Remediation Tasks erstellt - einen pro Policy
+    innerhalb der Initiative "Enable ChangeTracking and Inventory for Arc-enabled VMs".
+
+    Die 6 Policies:
+      1. DeployAMAWindowsHybridVMWithUAIChangeTrackingAndInventory
+      2. DeployAMALinuxHybridVMWithUAIChangeTrackingAndInventory
+      3. DeployChangeTrackingExtensionWindowsHybridVM
+      4. DeployChangeTrackingExtensionLinuxHybridVM
+      5. DCRAWindowsHybridVMChangeTrackingAndInventory
+      6. DCRALinuxHybridVMChangeTrackingAndInventory
 
 .VORAUSSETZUNGEN
     - Azure CLI installiert
@@ -43,13 +48,24 @@ $ResourceGroups = @(
 # Muss identisch zum Deploy-Script sein
 $AssignmentPrefix = "CT-Arc"
 
-# Arc Initiative ID
-$ArcInitiativeId = "53448c70-089b-4f52-8f38-89196d7f2de1"
-
 # ============================================================
 # === ENDE KONFIGURATION =====================================
 # ============================================================
 
+# Hardcodierte Policy Reference IDs der Arc Initiative
+# Quelle: az policy set-definition show --name 53448c70-089b-4f52-8f38-89196d7f2de1
+$PolicyReferenceIds = @(
+    "DeployAMAWindowsHybridVMWithUAIChangeTrackingAndInventory",
+    "DeployAMALinuxHybridVMWithUAIChangeTrackingAndInventory",
+    "DeployChangeTrackingExtensionWindowsHybridVM",
+    "DeployChangeTrackingExtensionLinuxHybridVM",
+    "DCRAWindowsHybridVMChangeTrackingAndInventory",
+    "DCRALinuxHybridVMChangeTrackingAndInventory"
+)
+
+# ------------------------------------------------------------------
+# Hilfsfunktionen
+# ------------------------------------------------------------------
 function Write-Header {
     param([string]$Text)
     Write-Host "`n$("=" * 65)" -ForegroundColor Cyan
@@ -83,52 +99,16 @@ $null = az account set --subscription $SubscriptionId 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Err "Subscription nicht gefunden oder kein Zugriff."; exit 1 }
 Write-Success "Subscription aktiv: $SubscriptionId"
 
-# ------------------------------------------------------------------
-# Policy Definition Reference IDs dynamisch aus Initiative lesen
-# ------------------------------------------------------------------
-Write-Step "Lese Policy Definition Reference IDs aus Initiative..."
-# Built-in Initiative laden - erst ohne, dann mit --subscription als Fallback
-$initiativeRaw = az policy set-definition show --name $ArcInitiativeId 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Warn "Erster Versuch fehlgeschlagen - versuche mit --subscription..."
-    $initiativeRaw = az policy set-definition show --name $ArcInitiativeId --subscription $SubscriptionId 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Err "Initiative '$ArcInitiativeId' konnte nicht geladen werden:"
-        Write-Host "  $initiativeRaw" -ForegroundColor Red
-        exit 1
-    }
-}
-# Sicheres JSON-Parsing - Fehlermeldungen vor dem JSON herausfiltern
-$jsonLines = $initiativeRaw | Where-Object { $_ -match '^\s*[{\[]' -or $jsonStarted } | ForEach-Object {
-    $script:jsonStarted = $true; $_
-}
-$jsonString = ($initiativeRaw -join "`n")
-try {
-    $initiativeDef = $jsonString | ConvertFrom-Json -ErrorAction Stop
-} catch {
-    Write-Err "JSON-Parsing fehlgeschlagen. Bitte manuell pruefen:"
-    Write-Host "  az policy set-definition show --name $ArcInitiativeId" -ForegroundColor DarkGray
-    Write-Host "  Fehler: $_" -ForegroundColor Red
-    exit 1
-}
-if (-not $initiativeDef -or -not $initiativeDef.policyDefinitions) {
-    Write-Err "Initiative geladen aber keine policyDefinitions gefunden."
-    exit 1
-}
-
-$referenceIds = $initiativeDef.policyDefinitions | ForEach-Object { $_.policyDefinitionReferenceId }
-
-Write-Success "Initiative: $($initiativeDef.displayName)"
 Write-Host ""
-Write-Host "  Gefundene Policy Reference IDs ($($referenceIds.Count)):" -ForegroundColor White
-foreach ($refId in $referenceIds) {
+Write-Host "  Policy Reference IDs ($($PolicyReferenceIds.Count) Stueck):" -ForegroundColor White
+foreach ($refId in $PolicyReferenceIds) {
     Write-Host "    - $refId" -ForegroundColor DarkGray
 }
 
 # ------------------------------------------------------------------
 # Remediation Tasks pro RG und pro Policy erstellen
 # ------------------------------------------------------------------
-Write-Header "Erstelle Remediation Tasks ($($referenceIds.Count) Tasks pro Resource Group)"
+Write-Header "Erstelle Remediation Tasks ($($PolicyReferenceIds.Count) Tasks pro Resource Group)"
 
 $timestamp    = Get-Date -Format 'yyyyMMddHHmm'
 $successCount = 0
@@ -139,7 +119,7 @@ foreach ($rg in $ResourceGroups) {
 
     Write-Step "Resource Group: $rg"
 
-    $rgClean        = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($rg -replace "[^a-zA-Z0-9-]","").Length, 24))
+    $rgClean        = ($rg -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($rg -replace "[^a-zA-Z0-9-]","").Length, 20))
     $assignmentName = "$AssignmentPrefix-$rgClean"
     $scope          = "/subscriptions/$SubscriptionId/resourceGroups/$rg"
 
@@ -147,6 +127,7 @@ foreach ($rg in $ResourceGroups) {
     $assignCheck = az policy assignment show --name $assignmentName --scope $scope 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Assignment '$assignmentName' nicht gefunden - ueberspringe '$rg'."
+        Write-Host "  Vorhandene Assignments anzeigen:" -ForegroundColor DarkGray
         Write-Host "  az policy assignment list --scope $scope -o table" -ForegroundColor DarkGray
         $rgErrorCount++
         continue
@@ -162,9 +143,10 @@ foreach ($rg in $ResourceGroups) {
     $rgSuccess = 0
     $rgError   = 0
 
-    foreach ($refId in $referenceIds) {
+    foreach ($refId in $PolicyReferenceIds) {
 
-        $refIdShort      = ($refId -replace "[^a-zA-Z0-9-]", "").Substring(0, [Math]::Min(($refId -replace "[^a-zA-Z0-9-]","").Length, 18))
+        # Remediation-Name aufbauen und auf 64 Zeichen kuerzen
+        $refIdShort      = $refId.Substring(0, [Math]::Min($refId.Length, 20))
         $remNameRaw      = "rem-$rgClean-$refIdShort-$timestamp"
         $remediationName = $remNameRaw.Substring(0, [Math]::Min($remNameRaw.Length, 64))
 
@@ -178,8 +160,8 @@ foreach ($rg in $ResourceGroups) {
             --resource-group $rg 2>&1
 
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Task fehlgeschlagen fuer '$refId':"
-            Write-Host "  $remResult" -ForegroundColor DarkGray
+            Write-Err "Task fehlgeschlagen:"
+            Write-Host "  $remResult" -ForegroundColor Red
             $rgError++
             $errorCount++
         } else {
