@@ -87,9 +87,32 @@ Write-Success "Subscription aktiv: $SubscriptionId"
 # Policy Definition Reference IDs dynamisch aus Initiative lesen
 # ------------------------------------------------------------------
 Write-Step "Lese Policy Definition Reference IDs aus Initiative..."
-$initiativeDef = az policy set-definition show --name $ArcInitiativeId 2>&1 | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or -not $initiativeDef) {
-    Write-Err "Initiative '$ArcInitiativeId' konnte nicht geladen werden."
+# Built-in Initiative laden - erst ohne, dann mit --subscription als Fallback
+$initiativeRaw = az policy set-definition show --name $ArcInitiativeId 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn "Erster Versuch fehlgeschlagen - versuche mit --subscription..."
+    $initiativeRaw = az policy set-definition show --name $ArcInitiativeId --subscription $SubscriptionId 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Initiative '$ArcInitiativeId' konnte nicht geladen werden:"
+        Write-Host "  $initiativeRaw" -ForegroundColor Red
+        exit 1
+    }
+}
+# Sicheres JSON-Parsing - Fehlermeldungen vor dem JSON herausfiltern
+$jsonLines = $initiativeRaw | Where-Object { $_ -match '^\s*[{\[]' -or $jsonStarted } | ForEach-Object {
+    $script:jsonStarted = $true; $_
+}
+$jsonString = ($initiativeRaw -join "`n")
+try {
+    $initiativeDef = $jsonString | ConvertFrom-Json -ErrorAction Stop
+} catch {
+    Write-Err "JSON-Parsing fehlgeschlagen. Bitte manuell pruefen:"
+    Write-Host "  az policy set-definition show --name $ArcInitiativeId" -ForegroundColor DarkGray
+    Write-Host "  Fehler: $_" -ForegroundColor Red
+    exit 1
+}
+if (-not $initiativeDef -or -not $initiativeDef.policyDefinitions) {
+    Write-Err "Initiative geladen aber keine policyDefinitions gefunden."
     exit 1
 }
 
